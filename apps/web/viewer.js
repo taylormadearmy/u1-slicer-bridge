@@ -72,7 +72,13 @@ function gcodeViewer(initialJobId) {
                 await this.loadLayers(0, 20);
                 console.log('Layers loaded, cache size:', this.layerCache.size);
 
-                this.renderLayer(0);
+                // Render first layer if it exists
+                if (this.layerCache.has(0)) {
+                    console.log('Rendering layer 0...');
+                    this.renderLayer(0);
+                } else {
+                    console.error('Layer 0 not loaded after loadLayers call');
+                }
             } catch (err) {
                 console.error('Failed to initialize viewer:', err);
                 this.error = `Failed to load G-code preview: ${err.message}`;
@@ -98,7 +104,8 @@ function gcodeViewer(initialJobId) {
             this.ctx.scale(dpr, dpr);
 
             this.calculateScale();
-            if (this.currentLayer >= 0) {
+            // Only render if bounds exist and layer is cached (data loaded)
+            if (this.bounds && this.layerCache.has(this.currentLayer)) {
                 this.renderLayer(this.currentLayer);
             }
         },
@@ -246,6 +253,8 @@ function gcodeViewer(initialJobId) {
          * Draw print bounds and dimensions
          */
         drawPrintBounds() {
+            if (!this.bounds) return;
+
             // Draw print area outline
             const printWidth = this.bounds.max_x - this.bounds.min_x;
             const printHeight = this.bounds.max_y - this.bounds.min_y;
