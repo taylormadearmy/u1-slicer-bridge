@@ -1,0 +1,15 @@
+{
+    "filament_settings_id": [
+        "Bambu PLA Basic @BBL X1C - hotter bed"
+    ],
+    "from": "User",
+    "inherits": "Bambu PLA Basic @BBL X1C",
+    "name": "Bambu PLA Basic @BBL X1C - hotter bed",
+    "textured_plate_temp": [
+        "65"
+    ],
+    "textured_plate_temp_initial_layer": [
+        "65"
+    ],
+    "version": "1.7.0.30"
+}

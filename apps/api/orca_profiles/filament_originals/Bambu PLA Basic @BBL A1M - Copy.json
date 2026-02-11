@@ -1,0 +1,12 @@
+{
+    "filament_flow_ratio": [
+        "0.96"
+    ],
+    "filament_settings_id": [
+        "Bambu PLA Basic @BBL A1M - Copy"
+    ],
+    "from": "User",
+    "inherits": "Bambu PLA Basic @BBL A1M",
+    "name": "Bambu PLA Basic @BBL A1M - Copy",
+    "version": "1.9.0.14"
+}

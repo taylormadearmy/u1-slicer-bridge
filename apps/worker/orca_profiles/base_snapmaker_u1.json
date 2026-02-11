@@ -1,0 +1,15 @@
+{
+  "printer_model": "Snapmaker U1",
+  "printer_variant": "0.4mm nozzle",
+  "bed_shape": "0x0,300x0,300x250,0x250",
+  "max_print_height": "235",
+  "nozzle_diameter": "0.4",
+  "layer_height": "0.2",
+  "first_layer_height": "0.25",
+  "wall_loops": "3",
+  "top_layers": "4",
+  "bottom_layers": "3",
+  "infill_density": "15%",
+  "support_material": "0",
+  "brim_width": "3"
+}

@@ -1,0 +1,9 @@
+{
+  "filament_type": "{material}",
+  "nozzle_temperature": "{nozzle_temp}",
+  "bed_temperature": "{bed_temp}",
+  "print_speed": "{print_speed}",
+  "first_layer_speed": "20",
+  "retraction_length": "0.8",
+  "retraction_speed": "40"
+}

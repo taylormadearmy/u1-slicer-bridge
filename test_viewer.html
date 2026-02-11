@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Viewer Test</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="http://localhost:8080/api.js"></script>
+    <script src="http://localhost:8080/viewer.js"></script>
+    <style>
+        body { font-family: system-ui; padding: 20px; }
+        .canvas-container { width: 800px; height: 600px; background: #1a1a1a; border-radius: 8px; }
+        canvas { width: 100%; height: 100%; }
+        .error { color: red; padding: 20px; }
+        .info { color: green; padding: 10px; }
+    </style>
+</head>
+<body>
+    <h1>G-code Viewer Test</h1>
+
+    <div x-data="testApp()">
+        <div class="info">
+            <div>Job ID: <span x-text="jobId"></span></div>
+            <div>Status: <span x-text="status"></span></div>
+        </div>
+
+        <button @click="loadViewer()" x-show="!viewerLoaded">Load Viewer</button>
+
+        <template x-if="viewerLoaded && jobId">
+            <div x-data="gcodeViewer(jobId)">
+                <div class="canvas-container">
+                    <canvas x-ref="canvas"></canvas>
+                </div>
+
+                <div x-show="error" class="error" x-text="error"></div>
+
+                <div x-show="!error">
+                    <p>Layer <span x-text="currentLayer + 1"></span> / <span x-text="totalLayers"></span></p>
+                    <input type="range"
+                           x-model.number="currentLayer"
+                           @input="onLayerChange(currentLayer)"
+                           min="0"
+                           :max="totalLayers - 1"
+                           style="width: 100%;">
+                    <label>
+                        <input type="checkbox" x-model="showTravel" @change="renderLayer(currentLayer)">
+                        Show travel moves
+                    </label>
+                </div>
+            </div>
+        </template>
+    </div>
+
+    <script>
+        function testApp() {
+            return {
+                jobId: 'slice_47a4556bb6c2',
+                viewerLoaded: false,
+                status: 'Ready',
+
+                loadViewer() {
+                    this.viewerLoaded = true;
+                    this.status = 'Viewer loaded';
+                }
+            };
+        }
+    </script>
+</body>
+</html>

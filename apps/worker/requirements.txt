@@ -1,0 +1,2 @@
+# No Python dependencies for now - Orca Slicer is standalone AppImage
+# Add here if we need helper scripts in the future

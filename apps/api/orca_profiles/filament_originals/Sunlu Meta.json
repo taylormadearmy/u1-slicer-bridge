@@ -1,0 +1,15 @@
+{
+    "filament_cost": [
+        "12.99"
+    ],
+    "filament_settings_id": [
+        "Sunlu Meta"
+    ],
+    "filament_vendor": [
+        "Sunlu Meta"
+    ],
+    "from": "User",
+    "inherits": "Bambu PLA Basic @BBL X1C",
+    "name": "Sunlu Meta",
+    "version": "1.7.0.29"
+}

@@ -1,0 +1,24 @@
+{
+    "filament_flow_ratio": [
+        "0.95"
+    ],
+    "filament_settings_id": [
+        "Bambu PLA Basic @BBL X1C - hot bed"
+    ],
+    "from": "User",
+    "hot_plate_temp": [
+        "65"
+    ],
+    "hot_plate_temp_initial_layer": [
+        "65"
+    ],
+    "inherits": "Bambu PLA Basic @BBL X1C",
+    "name": "Bambu PLA Basic @BBL X1C - hot bed",
+    "textured_plate_temp": [
+        "65"
+    ],
+    "textured_plate_temp_initial_layer": [
+        "65"
+    ],
+    "version": "1.8.0.13"
+}

@@ -1,0 +1,12 @@
+{
+    "filament_flow_ratio": [
+        "0.9702"
+    ],
+    "filament_settings_id": [
+        "Sunlu PLA Basic Flow Rate Calibrated"
+    ],
+    "from": "User",
+    "inherits": "Bambu PLA Basic @BBL X1C",
+    "name": "Sunlu PLA Basic Flow Rate Calibrated",
+    "version": "1.8.0.25"
+}
