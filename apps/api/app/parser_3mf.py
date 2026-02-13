@@ -2,6 +2,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Any
+import json
 
 
 class Object3MF:
@@ -133,3 +134,163 @@ def parse_3mf(file_path: Path) -> List[Object3MF]:
         raise ValueError("Invalid .3mf file: missing 3D/3dmodel.model")
 
     return objects
+
+
+def _extract_assigned_extruders(file_path: Path) -> List[int]:
+    """Return sorted unique assigned extruder indices (1-based) from model_settings."""
+    assigned: List[int] = []
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/model_settings.config" not in zf.namelist():
+                return []
+
+            root = ET.fromstring(zf.read("Metadata/model_settings.config"))
+            for meta in root.findall(".//metadata"):
+                if meta.get("key") != "extruder":
+                    continue
+                raw = (meta.get("value") or "").strip()
+                if not raw:
+                    continue
+                try:
+                    idx = int(raw)
+                except ValueError:
+                    continue
+                if idx > 0 and idx not in assigned:
+                    assigned.append(idx)
+    except Exception:
+        return []
+
+    assigned.sort()
+    return assigned
+
+
+def detect_active_extruders_from_3mf(file_path: Path) -> List[int]:
+    """Public helper for active extruder assignments used by models."""
+    return _extract_assigned_extruders(file_path)
+
+
+def detect_colors_from_3mf(file_path: Path) -> List[str]:
+    """
+    Detect colors from a .3mf file.
+    
+    Looks for:
+    - Metadata/filament_sequence.json (BambuStudio)
+    - Metadata/project_settings.config (extruder_colour, filament_colour)
+    - Metadata/extruder_colour in model metadata
+    
+    Returns list of unique color hex codes (e.g., ["#FF0000", "#00FF00"])
+    """
+    colors = []
+    
+    try:
+        assigned_extruders = _extract_assigned_extruders(file_path)
+        with zipfile.ZipFile(file_path, "r") as zf:
+            # Try to read filament_sequence.json (BambuStudio format)
+            try:
+                seq_data = zf.read("Metadata/filament_sequence.json")
+                seq = json.loads(seq_data)
+                
+                # Filament sequence contains color info
+                # Format: {"filament_info": [{"color": "#FF0000", ...}, ...]}
+                if "filament_info" in seq:
+                    for filament in seq["filament_info"]:
+                        color = filament.get("color", "#FFFFFF")
+                        # Convert to hex if needed (Bambu may use different formats)
+                        if not color.startswith("#"):
+                            color = "#" + color
+                        colors.append(color)
+                        
+                # Also check plate sequences
+                for plate_name, plate_data in seq.items():
+                    if isinstance(plate_data, dict) and "sequence" in plate_data:
+                        for filament in plate_data["sequence"]:
+                            color = filament.get("color", "#FFFFFF")
+                            if not color.startswith("#"):
+                                color = "#" + color
+                            colors.append(color)
+                            
+            except KeyError:
+                # filament_sequence.json not found, try other methods
+                pass
+            
+            # Try to read from project_settings.config
+            try:
+                settings_data = zf.read("Metadata/project_settings.config")
+                settings = json.loads(settings_data)
+
+                # Prefer colors tied to actually assigned extruders when available.
+                if assigned_extruders:
+                    active_colors = []
+                    filament_colors = settings.get("filament_colour", [])
+                    if isinstance(filament_colors, list):
+                        for ext in assigned_extruders:
+                            idx = ext - 1
+                            if 0 <= idx < len(filament_colors):
+                                c = filament_colors[idx]
+                                if c and c not in active_colors:
+                                    active_colors.append(c)
+                    if active_colors:
+                        return active_colors
+                
+                # Check extruder_colour
+                extruder_colors = settings.get("extruder_colour", [])
+                if isinstance(extruder_colors, list):
+                    for color in extruder_colors:
+                        if color and color not in colors:
+                            colors.append(color)
+                
+                # Check filament_colour  
+                filament_colors = settings.get("filament_colour", [])
+                if isinstance(filament_colors, list):
+                    for color in filament_colors:
+                        if color and color not in colors:
+                            colors.append(color)
+                            
+            except (KeyError, ValueError):
+                pass
+            
+            # Try to read from model metadata
+            try:
+                model_xml = zf.read("3D/3dmodel.model")
+                root = ET.fromstring(model_xml)
+                
+                ns = {
+                    "m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
+                    "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06",
+                    "b": "http://schema.bambulab.com/bambustudio/2023/03"
+                }
+                
+                # Look for metadata element
+                metadata = root.find("m:metadata", ns)
+                if metadata is not None:
+                    # Check for extruder_colour in metadata
+                    for meta in metadata.findall("m:metadataproperty", ns):
+                        name = meta.get("name", "")
+                        if name == "extruder_colour" or name == "b:extruder_colour":
+                            value = meta.get("value", "")
+                            if value:
+                                # May be JSON array: ["#FF0000", "#00FF00"]
+                                try:
+                                    extruder_colors = json.loads(value)
+                                    if isinstance(extruder_colors, list):
+                                        for c in extruder_colors:
+                                            if c not in colors:
+                                                colors.append(c)
+                                except:
+                                    pass
+                                    
+            except (KeyError, ET.ParseError):
+                pass
+                
+    except zipfile.BadZipFile:
+        pass
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_colors = []
+    for c in colors:
+        if c not in seen:
+            seen.add(c)
+            unique_colors.append(c)
+    
+    return unique_colors

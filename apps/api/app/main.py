@@ -97,7 +97,7 @@ async def get_filaments():
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, is_default FROM filaments ORDER BY name"
+            "SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default FROM filaments ORDER BY name"
         )
 
         filaments = [
@@ -109,6 +109,8 @@ async def get_filaments():
                 "bed_temp": row["bed_temp"],
                 "print_speed": row["print_speed"],
                 "bed_type": row["bed_type"] or "PEI",
+                "color_hex": row["color_hex"] or "#FFFFFF",
+                "extruder_index": row["extruder_index"] or 0,
                 "is_default": row["is_default"]
             }
             for row in rows
@@ -124,6 +126,8 @@ class FilamentCreate(BaseModel):
     bed_temp: int
     print_speed: Optional[int] = 60
     bed_type: str = "PEI"
+    color_hex: str = "#FFFFFF"
+    extruder_index: int = 0
     is_default: bool = False
 
 
@@ -136,8 +140,8 @@ async def create_filament(filament: FilamentCreate):
     async with pool.acquire() as conn:
         result = await conn.fetchrow(
             """
-            INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, is_default)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id
             """,
             filament.name,
@@ -146,6 +150,8 @@ async def create_filament(filament: FilamentCreate):
             filament.bed_temp,
             filament.print_speed,
             filament.bed_type,
+            filament.color_hex,
+            filament.extruder_index,
             filament.is_default
         )
 
@@ -159,11 +165,13 @@ async def init_default_filaments():
     pool = get_pg_pool()
 
     default_filaments = [
-        {"name": "PLA Red", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "is_default": True},
-        {"name": "PLA Blue", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "is_default": False},
-        {"name": "PETG", "material": "PETG", "nozzle_temp": 240, "bed_temp": 80, "print_speed": 50, "bed_type": "PEI", "is_default": False},
-        {"name": "ABS", "material": "ABS", "nozzle_temp": 250, "bed_temp": 100, "print_speed": 50, "bed_type": "Glass", "is_default": False},
-        {"name": "TPU", "material": "TPU", "nozzle_temp": 220, "bed_temp": 40, "print_speed": 30, "bed_type": "PEI", "is_default": False},
+        {"name": "PLA Red", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FF0000", "extruder_index": 0, "is_default": True},
+        {"name": "PLA Blue", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#0000FF", "extruder_index": 1, "is_default": False},
+        {"name": "PLA Green", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#00FF00", "extruder_index": 2, "is_default": False},
+        {"name": "PLA Yellow", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FFFF00", "extruder_index": 3, "is_default": False},
+        {"name": "PETG", "material": "PETG", "nozzle_temp": 240, "bed_temp": 80, "print_speed": 50, "bed_type": "PEI", "color_hex": "#FF6600", "extruder_index": 0, "is_default": False},
+        {"name": "ABS", "material": "ABS", "nozzle_temp": 250, "bed_temp": 100, "print_speed": 50, "bed_type": "Glass", "color_hex": "#333333", "extruder_index": 0, "is_default": False},
+        {"name": "TPU", "material": "TPU", "nozzle_temp": 220, "bed_temp": 40, "print_speed": 30, "bed_type": "PEI", "color_hex": "#FF00FF", "extruder_index": 0, "is_default": False},
     ]
 
     async with pool.acquire() as conn:
@@ -171,12 +179,12 @@ async def init_default_filaments():
             try:
                 await conn.execute(
                     """
-                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, is_default)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (name) DO NOTHING
                     """,
                     f["name"], f["material"], f["nozzle_temp"], f["bed_temp"],
-                    f["print_speed"], f["bed_type"], f["is_default"]
+                    f["print_speed"], f["bed_type"], f["color_hex"], f["extruder_index"], f["is_default"]
                 )
             except Exception as e:
                 pass

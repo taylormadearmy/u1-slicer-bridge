@@ -120,17 +120,27 @@ class ApiClient {
      * @returns {Promise<{job_id: string, status: string}>}
      */
     async sliceUpload(uploadId, settings) {
+        const payload = {
+            layer_height: settings.layer_height,
+            infill_density: settings.infill_density,
+            supports: settings.supports,
+            nozzle_temp: settings.nozzle_temp,
+            bed_temp: settings.bed_temp,
+            bed_type: settings.bed_type,
+            filament_colors: settings.filament_colors,  // Allow color override per extruder
+            extruder_assignments: settings.extruder_assignments
+        };
+        
+        // Support both single filament_id and filament_ids array
+        if (settings.filament_ids && settings.filament_ids.length > 0) {
+            payload.filament_ids = settings.filament_ids;
+        } else if (settings.filament_id) {
+            payload.filament_id = settings.filament_id;
+        }
+        
         return this.fetch(`/uploads/${uploadId}/slice`, {
             method: 'POST',
-            body: JSON.stringify({
-                filament_id: settings.filament_id,
-                layer_height: settings.layer_height,
-                infill_density: settings.infill_density,
-                supports: settings.supports,
-                nozzle_temp: settings.nozzle_temp,
-                bed_temp: settings.bed_temp,
-                bed_type: settings.bed_type
-            }),
+            body: JSON.stringify(payload),
         });
     }
 
@@ -151,18 +161,28 @@ class ApiClient {
      * @returns {Promise<{job_id: string, status: string}>}
      */
     async slicePlate(uploadId, plateId, settings) {
+        const payload = {
+            plate_id: plateId,
+            layer_height: settings.layer_height,
+            infill_density: settings.infill_density,
+            supports: settings.supports,
+            nozzle_temp: settings.nozzle_temp,
+            bed_temp: settings.bed_temp,
+            bed_type: settings.bed_type,
+            filament_colors: settings.filament_colors,
+            extruder_assignments: settings.extruder_assignments
+        };
+        
+        // Support both single filament_id and filament_ids array
+        if (settings.filament_ids && settings.filament_ids.length > 0) {
+            payload.filament_ids = settings.filament_ids;
+        } else if (settings.filament_id) {
+            payload.filament_id = settings.filament_id;
+        }
+        
         return this.fetch(`/uploads/${uploadId}/slice-plate`, {
             method: 'POST',
-            body: JSON.stringify({
-                plate_id: plateId,
-                filament_id: settings.filament_id,
-                layer_height: settings.layer_height,
-                infill_density: settings.infill_density,
-                supports: settings.supports,
-                nozzle_temp: settings.nozzle_temp,
-                bed_temp: settings.bed_temp,
-                bed_type: settings.bed_type
-            }),
+            body: JSON.stringify(payload),
         });
     }
 
@@ -235,6 +255,34 @@ class ApiClient {
     downloadGCode(jobId) {
         // Open download in new window
         window.open(`/jobs/${jobId}/download`, '_blank');
+    }
+
+    /**
+     * List all slicing jobs
+     * @returns {Promise<Array>}
+     */
+    async getJobs() {
+        return this.fetch('/jobs');
+    }
+
+    /**
+     * Delete an upload and all associated jobs
+     * @param {string} uploadId - The upload ID to delete
+     */
+    async deleteUpload(uploadId) {
+        return this.fetch(`/upload/${uploadId}`, {
+            method: 'DELETE',
+        });
+    }
+
+    /**
+     * Delete a single slicing job
+     * @param {string} jobId - The job ID to delete
+     */
+    async deleteJob(jobId) {
+        return this.fetch(`/jobs/${jobId}`, {
+            method: 'DELETE',
+        });
     }
 }
 

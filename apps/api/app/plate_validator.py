@@ -6,6 +6,8 @@ Now supports multi-plate 3MF files - validates individual plates.
 
 import trimesh
 import logging
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from config import PrinterProfile
@@ -73,19 +75,28 @@ class PlateValidator:
                 logger.info(f"Combined scene dimensions: {width:.1f}x{depth:.1f}x{height:.1f}mm")
 
             # Check against printer build volume limits
-            warnings = self._check_build_volume(width, depth, height)
+            build_volume_warnings = self._check_build_volume(width, depth, height)
+            warnings = list(build_volume_warnings)
 
             # Check for objects below bed (Z < 0)
             if bounds['min'][2] < -0.001:  # Tolerance for floating point
-                warnings.append(
-                    f"Warning: Objects extend below bed (Z_min = {bounds['min'][2]:.1f}mm). "
-                    "This may cause printing issues."
-                )
+                if self._is_bambu_z_offset_artifact(file_path, float(bounds['min'][2])):
+                    logger.info(
+                        "Suppressing below-bed warning for %s (likely Bambu source-offset artifact, Z_min=%.3f)",
+                        file_path.name,
+                        float(bounds['min'][2]),
+                    )
+                else:
+                    warnings.append(
+                        f"Warning: Objects extend below bed (Z_min = {bounds['min'][2]:.1f}mm). "
+                        "This may cause printing issues."
+                    )
 
             result = {
                 "bounds": bounds,
                 "warnings": warnings,
-                "fits": len(warnings) == 0,
+                "fits": len(build_volume_warnings) == 0,
+                "build_volume_warnings": build_volume_warnings,
                 "is_multi_plate": is_multi_plate,
                 "plates": bounds_info.get("plates", [])
             }
@@ -149,3 +160,29 @@ class PlateValidator:
             )
 
         return warnings
+
+    def _is_bambu_z_offset_artifact(self, file_path: Path, min_z: float) -> bool:
+        """Heuristic for Bambu-exported files with metadata-induced negative Z.
+
+        Some Bambu 3MF files carry source offsets that can make raw scene bounds go
+        below Z=0 even though slicer placement is valid.
+        """
+        if min_z < -15.0:
+            return False
+
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                names = set(zf.namelist())
+                if "Metadata/project_settings.config" not in names:
+                    return False
+                if "Metadata/model_settings.config" not in names:
+                    return False
+
+                root = ET.fromstring(zf.read("Metadata/model_settings.config"))
+                has_source_offset_z = any(
+                    m.get("key") == "source_offset_z"
+                    for m in root.findall(".//metadata")
+                )
+                return has_source_offset_z
+        except Exception:
+            return False

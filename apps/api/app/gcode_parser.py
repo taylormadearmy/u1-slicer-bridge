@@ -56,6 +56,27 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
     filament_used_mm = 0.0
     layer_count = None
 
+    def parse_time_from_line(line: str) -> Optional[int]:
+        lowered = line.lower()
+
+        # Newer Orca/Snapmaker summaries (usually in header)
+        # Example: ; model printing time: 37m 15s; total estimated time: 37m 18s
+        total_est_match = re.search(r'total\s+estimated\s+time\s*:\s*([^;]+)', lowered)
+        if total_est_match:
+            return parse_time_to_seconds(total_est_match.group(1).strip())
+
+        model_time_match = re.search(r'model\s+printing\s+time\s*:\s*([^;]+)', lowered)
+        if model_time_match:
+            return parse_time_to_seconds(model_time_match.group(1).strip())
+
+        # Older Orca summary style
+        if 'estimated printing time' in lowered and 'normal mode' in lowered:
+            value_match = re.search(r'=\s*(.+)$', line)
+            if value_match:
+                return parse_time_to_seconds(value_match.group(1).strip())
+
+        return None
+
     # Read first 100 lines for header metadata (layer count)
     with open(gcode_path, 'r') as f:
         for i, line in enumerate(f):
@@ -70,6 +91,11 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
                 if layers_match:
                     layer_count = int(layers_match.group(1))
 
+            # Try parse estimated time from header summary
+            parsed_time = parse_time_from_line(line)
+            if parsed_time is not None:
+                estimated_time_seconds = max(estimated_time_seconds, parsed_time)
+
     # Read last 1000 lines for footer metadata (time, filament)
     # Orca Slicer puts summary metadata near the end, before CONFIG_BLOCK
     with open(gcode_path, 'r') as f:
@@ -80,10 +106,9 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
             line = line.strip()
 
             # Extract estimated time
-            if 'estimated printing time' in line.lower() and 'normal mode' in line.lower():
-                time_match = re.search(r'=\s*(.+)$', line)
-                if time_match:
-                    estimated_time_seconds = parse_time_to_seconds(time_match.group(1))
+            parsed_time = parse_time_from_line(line)
+            if parsed_time is not None:
+                estimated_time_seconds = max(estimated_time_seconds, parsed_time)
 
             # Extract filament usage (specifically [mm] units)
             elif 'filament used' in line.lower() and '[mm]' in line.lower():

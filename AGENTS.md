@@ -24,6 +24,53 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ---
 
+## Milestones Status
+
+### Foundation & Core Pipeline
+✅ M0 skeleton - Docker, FastAPI, services  
+✅ M1 database - PostgreSQL with uploads, jobs, filaments  
+✅ M3 object extraction - 3MF parser (handles MakerWorld files)  
+✅ M4 ~~normalization~~ → plate validation - Preserves arrangements  
+✅ M5 ~~bundles~~ → direct slicing with filament profiles  
+✅ M6 slicing - Snapmaker OrcaSlicer v2.2.4, Bambu support  
+
+### Device Integration & Print Execution
+⚠️ M2 moonraker - Health check only (no print control yet)  
+❌ M8 print control - NOT IMPLEMENTED  
+
+### File Lifecycle & Job Management
+✅ M9 sliced file access - Browse and view previously sliced G-code files  
+✅ M10 file deletion - Delete old uploads and sliced files  
+
+### Multi-Plate & Multicolour Workflow
+✅ M7.1 multi-plate support - Multi-plate 3MF detection and selection UI  
+✅ M11 multifilament support - Color detection from 3MF, auto-assignment, manual override, multi-extruder slicing  
+✅ M15 multicolour viewer - Show color legend in 2D viewer with all detected/assigned colors  
+✅ M16 flexible filament assignment - Allow overriding color per extruder (separate material type from color)
+❌ M17 prime tower options - Add configurable prime tower options for multicolour prints
+❌ M18 multi-plate visual selection - Show plate names and preview images when selecting plates
+
+### Preview & UX
+✅ M7 preview - Interactive 2D layer viewer  
+❌ M12 3D G-code viewer - Interactive 3D preview of sliced G-code  
+❌ M20 G-code viewer zoom - Add zooming in/out controls for preview
+❌ M21 upload/configure loading UX - Add progress indicator while upload is being prepared for filament/configuration selection
+❌ M22 navigation consistency - Standardize actions like "Back" and "Slice Another" across the UI
+
+### Slicing Controls & Profiles
+✅ M7.2 build plate type & temperature overrides - Set bed type per filament and override temps at slice time  
+❌ M13 custom filament profiles - Upload and use user-provided filament profiles  
+❌ M24 extruder presets - Preconfigure default slicing settings and filament color/type per extruder
+❌ M19 slicer selection - Choose between OrcaSlicer and Snapmaker Orca for slicing
+❌ M23 common slicing options - Allow changing wall count, infill pattern, and infill density (%)
+
+### Platform Expansion
+❌ M14 multi-machine support - Support for other printer models beyond U1
+
+**Current:** 13.7 / 24 complete (57%)
+
+---
+
 ## Definition of Done (DoD)
 
 A change is complete only if:
@@ -104,25 +151,31 @@ Avoid:
 
 ---
 
-## Milestones Status
+### Regression Testing
 
-✅ M0 skeleton - Docker, FastAPI, services
-✅ M1 database - PostgreSQL with uploads, jobs, filaments
-⚠️ M2 moonraker - Health check only (no print control yet)
-✅ M3 object extraction - 3MF parser (handles MakerWorld files)
-✅ M4 ~~normalization~~ → plate validation - Preserves arrangements
-✅ M5 ~~bundles~~ → direct slicing with filament profiles
-✅ M6 slicing - Snapmaker OrcaSlicer v2.2.4, Bambu support
-✅ M7 preview - Interactive 2D layer viewer
-✅ M7.1 multi-plate support - Multi-plate 3MF detection and selection UI
-✅ M7.2 build plate type & temperature overrides - Set bed type per filament and override temps at slice time
-❌ M8 print control - NOT IMPLEMENTED
+**Before submitting any changes, verify existing functionality still works:**
 
-**Current:** 7.7 / 8 complete (96%)
+1. **Test the core workflow:**
+   - Upload a .3mf file → should appear in Recent Uploads
+   - Click upload → should go to Configure step
+   - Slice → should generate G-code
+   - View/Download → should work
+
+2. **Test file management:**
+   - Checkboxes for multi-select work
+   - Shift-click for range select works
+   - Delete single file works
+   - Delete multiple selected files works
+
+3. **Common regressions to watch for:**
+   - Click handlers broken after UI changes
+   - Event propagation issues (@click.stop)
+   - State not updating after async operations
+   - API endpoints returning wrong data types
 
 ---
 
-## Plate Validation Contract
+### Plate Validation Contract
 
 Entire plate must:
 - Fit within 270x270x270mm build volume
@@ -229,6 +282,140 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Root Cause**: `slice_plate` endpoint was using original full 3MF instead of extracting selected plate
 - **Fix**: Added `extract_plate_to_3mf()` in `multi_plate_parser.py` to extract only the selected plate before slicing
 - **Result**: Single plate now slices correctly (~16MB, ~3.4 hours for Dragon Scale)
+
+**Fixed: Stale Build Volume Warnings**
+- **Problem**: Existing uploads showed incorrect "Exceeds build volume" warnings even after fixes
+- **Root Cause**: Bounds were validated at upload time and stored; re-validation wasn't happening
+- **Fix**: GET /upload/{id} now re-validates bounds each time using current validator
+- **Result**: Existing uploads now show accurate build volume status ✅
+
+**Fixed: G-code Viewer Colors**
+- **Problem**: G-code viewer only showed hardcoded blue color, ignoring filament colors
+- **Root Cause**: Viewer didn't receive or use filament color data
+- **Fix**: 
+  1. Added `filament_colors` column to `slicing_jobs` table (schema.sql)
+  2. Slice endpoints now store filament colors as JSON array
+  3. GET /jobs/{id} returns filament_colors
+  4. viewer.js fetches job status and uses filamentColors[0] for extrusion color
+- **Result**: G-code viewer now shows the filament color used for slicing ✅
+
+**Fixed: Multicolor Viewer Legend (M15)**
+- **Problem**: No way to see all colors when slicing multi-color files
+- **Fix**: Added color legend below viewer showing all extruder colors (E1, E2, etc.)
+- **Files**: viewer.js, index.html
+- **Result**: Color legend shows when multiple colors detected ✅
+
+**Fixed: Flexible Filament Assignment (M16)**
+- **Problem**: Couldn't override filament color - color was tied to filament profile
+- **Fix**: 
+  1. Added `filament_colors` parameter to slice requests (array of hex colors)
+  2. Color picker in UI to override detected colors per extruder
+  3. Priority: user override > detected colors > filament default
+- **Files**: routes_slice.py, api.js, app.js, index.html
+- **Result**: Can now assign any color to any extruder ✅
+
+**Multicolour Stability Update (Assignment-Preserving Path Added)**
+- **What changed**: Added an assignment-preserving profile embedding strategy for Bambu multicolour files in `profile_embedder.py`.
+  - Preserves original `model_settings.config` semantics
+  - Replaces incompatible custom G-code with Snapmaker-safe machine scripts
+  - Sanitizes known invalid project settings values
+  - Normalizes filament arrays to match assigned extruder count
+- **Result on validation file**: `calib-cube-10-dual-colour-merged.3mf` now slices successfully with real tool changes (`T0`, `T1`) instead of single-tool output.
+- **Safety behavior remains**: Slice endpoints still fail fast if multicolour is requested and output is only `T0`.
+  - Error: `Multicolour requested, but slicer produced single-tool G-code (T0 only).`
+- **Tracking tool**: `apps/api/app/multicolor_matrix.py` remains available for additional strategy validation on other model variants.
+
+**Fixed: Dragon Scale Segfault Path (>4 Colors on U1)**
+- **Problem**: `Dragon Scale infinity.3mf` could trigger Orca segmentation faults when sliced as multicolour.
+- **Root Cause**: File reports 7 detected color regions while U1 supports max 4 extruders; forcing multicolour requests caused unstable slicer behavior.
+- **Fix**:
+  1. Frontend now falls back to single-filament mode when detected colors exceed 4 and shows a clear notice.
+  2. Override mode is disabled for this overflow case.
+  3. Backend now rejects multicolour requests for >4 detected colors (and rejects `filament_ids` longer than 4) with a clear 400 error.
+- **Result**: Dragon slices reliably in single-filament mode; unsupported multicolour requests fail fast with actionable error text.
+
+**Active-Color Detection Update (Assignment-Aware)**
+- **Problem**: Some Bambu files report many palette/default colors in metadata, which overstated actual extruders in use.
+- **Fix**: `parser_3mf.py::detect_colors_from_3mf()` now prioritizes model-assigned extruders from `Metadata/model_settings.config` and maps them to active colors from `project_settings.config`.
+- **Result**: Dragon now reports only assigned colors (e.g., 3 active colors instead of 7 metadata colors), improving UI assignment behavior and validation decisions.
+
+**Multicolour Crash Handling Update (Clear Failure Mode)**
+- **Problem**: Certain files (e.g., Dragon/Poker variants) can still segfault in Snapmaker Orca v2.2.4 when multicolour slicing is attempted.
+- **Fix**: Slice endpoints now convert multicolour segfaults into a clear, actionable 400 error instead of returning raw crash output.
+- **Error**: `Multicolour slicing is unstable for this model in Snapmaker Orca v2.2.4 (slicer crash). Try single-filament slicing for now.`
+
+**Fixed: Bambu `plater_name` Segfault Trigger (Dragon/Poker Variants)**
+- **Problem**: Two almost-identical files behaved differently: one multicolour slice crashed while the other succeeded.
+- **Root Cause**: `Metadata/model_settings.config` carried stale `plater_name` metadata from old/deleted plate context (e.g., `Dual Colour`). Snapmaker Orca v2.2.4 can segfault on this metadata in assignment-preserving multicolour path.
+- **Fix**: `profile_embedder.py` now sanitizes `model_settings.config` and clears non-empty `plater_name` values before slicing.
+- **Result**:
+  - `Dragon Scale infinity-1-plate-2-colours.3mf` now slices multicolour successfully (`T0`, `T1`).
+  - `Pokerchips-smaller.3mf` multicolour path also succeeds with real tool changes.
+
+**Fixed: Multi-Plate `slice-plate` Multicolour Crash Path**
+- **Problem**: `POST /uploads/{id}/slice-plate` could still crash/fail for Poker/Dragon while full-file slice succeeded.
+- **Root Cause**: Plate extraction/rebuild path altered model structure before slicing, reintroducing Orca instability on assignment-preserving multicolour files.
+- **Fix**: Slice selected plates directly using Orca's built-in plate selector (`--slice <plate_id>`) on the embedded source 3MF, instead of extracting plate geometry first.
+- **Files**:
+  - `apps/api/app/routes_slice.py` (slice-plate workflow)
+  - `apps/api/app/slicer.py` (`slice_3mf(..., plate_index=...)`)
+- **Result**: Poker/Dragon multi-plate `slice-plate` now succeeds with real tool changes (`T0`, `T1`).
+
+**Adjusted: Bambu Negative-Z Upload Warning Noise**
+- **Problem**: Some Bambu exports (e.g., Pokerchips) showed `Objects extend below bed` warnings despite valid slicing/printing paths.
+- **Root Cause**: Raw 3MF source offsets (`source_offset_z` in `model_settings.config`) can produce negative scene bounds in validation, even when slicer placement is valid.
+- **Fix**: `plate_validator.py` now suppresses below-bed warnings for likely Bambu source-offset artifacts while keeping build-volume checks unchanged.
+- **Result**: Poker no longer shows misleading below-bed warnings in upload/configure flows.
+
+**Fixed: Sliced History Not Updating Immediately**
+- **Problem**: Newly completed slices were not appearing in "Sliced Files" until browser refresh.
+- **Root Cause**: Synchronous-complete slice path in frontend did not refresh jobs list.
+- **Fix**: `app.js::startSlice()` now calls `loadJobs()` immediately when slice returns `status=completed`.
+
+**Fixed: Estimated Time Showing as 0 for New Slices**
+- **Problem**: Many newly sliced files showed `estimated_time_seconds = 0`.
+- **Root Cause**: G-code metadata parser only handled older `estimated printing time (normal mode) = ...` comment format.
+- **Fix**: `gcode_parser.py` now also parses newer summary formats such as:
+  - `model printing time: ...`
+  - `total estimated time: ...`
+- **Result**: New slices now store and display non-zero estimated times when present in G-code comments.
+
+**Investigated: Extruder Slot Selection vs Tool IDs**
+- Frontend now preserves unassigned extruder slots in slice payload and backend supports assignment remap metadata.
+- On tested models, Snapmaker Orca can still compact active tools to low indices (`T0/T1`) in output even after remap.
+- Treat non-E1/E2 slot requests as best-effort until a deterministic Orca-compatible mapping strategy is found.
+
+**Implemented: Explicit Extruder Slot Remap in Output G-code**
+- **Problem**: Selecting E2/E3 in UI still produced compact tool commands (`T0/T1`) in generated G-code.
+- **Fix**:
+  1. Frontend now sends `extruder_assignments` in slice/slice-plate payloads and preserves slot positions.
+  2. Backend remaps model-assigned extruders via `model_settings.config` when embedding.
+  3. After slicing, backend rewrites compacted tool commands to requested slots in final G-code (`T*`, `M620 S* A`, `M621 S* A`).
+- **Files**:
+  - `apps/web/app.js`
+  - `apps/web/api.js`
+  - `apps/api/app/routes_slice.py`
+  - `apps/api/app/profile_embedder.py`
+  - `apps/api/app/slicer.py`
+- **Result**: E2/E3 selections now produce non-default tool IDs in output (e.g., `T1`/`T2`) instead of collapsing to `T0`/`T1`.
+
+**Fixed: E1/E3 Temperature Difference False Failure in UI Payload Path**
+- **Problem**: Selecting non-adjacent slots (e.g., E1 and E3) from browser UI could fail with `Cannot print multiple filaments which have large difference of temperature together...` even when user selected same material profile.
+- **Root Cause**: Frontend gap-fill for unused slots preferred the first global default filament (could be non-PLA), injecting a mismatched placeholder filament into `filament_ids`.
+- **Fix**: In `app.js`, placeholder slot fill now prefers the first filament already selected for this slice before falling back to global defaults.
+- **Result**: Browser path now slices E1/E3 without false temperature mismatch errors.
+
+**Fixed: G-code Viewer Layer Parsing Regression**
+- **Problem**: Viewer showed `No layer data returned for range 0-20` for valid G-code.
+- **Root Cause**: Backend layer parser only detected `;LAYER_CHANGE`, but generated G-code used `; CHANGE_LAYER` (and some files use `;LAYER:<n>`).
+- **Fix**: Updated `routes_slice.py::_parse_gcode_layers()` to detect all common layer markers.
+- **Result**: `/jobs/{id}/gcode/layers` returns layer geometry again; viewer renders normally.
+
+**Fixed: Fresh Upload Multi-Plate False Warning Path**
+- **Problem**: Fresh multi-plate uploads could still show combined-scene "Exceeds build volume" warnings even when individual plates fit.
+- **Root Cause**: Upload response used combined-scene validation warnings without per-plate suppression.
+- **Fix**: `routes_upload.py` now performs per-plate checks during upload and suppresses combined "exceeds" warnings when any plate fits.
+- **Result**: Fresh upload behavior now matches re-validation behavior from `GET /upload/{id}`.
 
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.

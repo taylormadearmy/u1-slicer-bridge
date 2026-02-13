@@ -498,7 +498,6 @@ def extract_plate_to_3mf(source_3mf: Path, target_plate_id: int, output_3mf: Pat
     Raises:
         ValueError: If plate not found or extraction fails
     """
-    import tempfile
     import shutil
     
     logger.info(f"Extracting plate {target_plate_id} from {source_3mf.name}")
@@ -522,36 +521,39 @@ def extract_plate_to_3mf(source_3mf: Path, target_plate_id: int, output_3mf: Pat
     if not target_plate:
         raise ValueError(f"Plate {target_plate_id} not found in file")
     
-    # Get the translation offset from the plate's transform
-    tx, ty, tz = target_plate.get_translation()
-    logger.info(f"Plate {target_plate_id} transform offset: ({tx}, {ty}, {tz})")
-    
-    # Load the mesh for this specific plate
+    # Keep original metadata/resources and only narrow <build> to the target plate.
+    # This preserves Bambu assignment semantics better than trimesh re-export.
     try:
-        # Use the existing _extract_plate_mesh function
-        # This parses the 3MF and extracts only the target plate's objects
-        mesh = _extract_plate_mesh(source_3mf, target_plate)
-        
-        if mesh is None:
-            raise ValueError(f"Could not extract geometry for plate {target_plate_id}")
-        
-        # The mesh is already transformed to its position in the original 3MF
-        # We need to translate it back to origin (0,0,0) for slicing
-        # The plate's transform tells us where it is positioned
-        translation = np.array([tx, ty, tz])
-        
-        # Invert the translation (move back to origin)
-        mesh.apply_translation(-translation)
-        
-        logger.info(f"Translated mesh by ({ -tx}, { -ty}, { -tz}) to center at origin")
-        
-        # Export as new 3MF
-        logger.info(f"Exporting extracted plate to {output_3mf}")
-        mesh.export(output_3mf, file_type='3mf')
-        
-        logger.info(f"Successfully extracted plate {target_plate_id}")
+        with zipfile.ZipFile(source_3mf, "r") as src_zf:
+            model_xml = src_zf.read("3D/3dmodel.model")
+            root = ET.fromstring(model_xml)
+
+            ns = {"m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"}
+            build = root.find("m:build", ns)
+            if build is None:
+                raise ValueError("3MF missing build section")
+
+            items = build.findall("m:item", ns)
+            if target_plate_id < 1 or target_plate_id > len(items):
+                raise ValueError(f"Plate {target_plate_id} out of range (1-{len(items)})")
+
+            # Keep all build items to preserve internal multi-plate metadata links,
+            # but mark non-target plates as non-printable.
+            for idx, item in enumerate(items, start=1):
+                item.set("printable", "1" if idx == target_plate_id else "0")
+
+            updated_model = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+            with zipfile.ZipFile(output_3mf, "w", zipfile.ZIP_DEFLATED) as dst_zf:
+                for info in src_zf.infolist():
+                    if info.filename == "3D/3dmodel.model":
+                        dst_zf.writestr(info.filename, updated_model)
+                    else:
+                        dst_zf.writestr(info, src_zf.read(info.filename))
+
+        logger.info(f"Successfully extracted plate {target_plate_id} with metadata preserved")
         return output_3mf
-        
+
     except Exception as e:
         logger.error(f"Failed to extract plate: {str(e)}")
         raise ValueError(f"Failed to extract plate {target_plate_id}: {str(e)}") from e

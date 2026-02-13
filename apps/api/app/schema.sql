@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS filaments (
 -- Add bed_type column if it doesn't exist (for existing databases)
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS bed_type TEXT DEFAULT 'PEI';
 
+-- Add color and extruder columns for multifilament support
+ALTER TABLE filaments ADD COLUMN IF NOT EXISTS color_hex VARCHAR(7) DEFAULT '#FFFFFF';
+ALTER TABLE filaments ADD COLUMN IF NOT EXISTS extruder_index INTEGER DEFAULT 0;
+ALTER TABLE filaments ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+
 -- ============================================================================
 -- OLD TABLES (removed - plate-based workflow)
 -- ============================================================================
@@ -66,12 +71,16 @@ CREATE TABLE IF NOT EXISTS slicing_jobs (
     filament_used_mm REAL,
     layer_count INTEGER,
     three_mf_path TEXT,
+    filament_colors TEXT,  -- JSON array of color hex codes used
     error_message TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_slicing_jobs_job_id ON slicing_jobs(job_id);
 CREATE INDEX IF NOT EXISTS idx_slicing_jobs_upload_id ON slicing_jobs(upload_id);
+
+-- Migration: Add filament_colors column to existing databases
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS filament_colors TEXT;
 
 -- ============================================================================
 -- OLD WORKFLOW CLEANUP (already migrated)

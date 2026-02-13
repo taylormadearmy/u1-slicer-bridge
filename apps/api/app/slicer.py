@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+import re
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -150,7 +151,8 @@ class OrcaSlicer:
         self,
         three_mf_path: Path,
         workspace: Path,
-        output_name: str = "output.gcode"
+        output_name: str = "output.gcode",
+        plate_index: Optional[int] = None,
     ) -> Dict:
         """Execute Orca Slicer CLI with pre-built 3MF file.
 
@@ -171,10 +173,12 @@ class OrcaSlicer:
         if not three_mf_path.exists():
             raise SlicingError(f"3MF file not found: {three_mf_path}")
 
+        slice_arg = str(plate_index) if plate_index is not None else "0"
+
         cmd = [
             "xvfb-run", "-a",
             str(self.orca_bin),
-            "--slice", "0",  # Slice all plates
+            "--slice", slice_arg,
             "--allow-newer-file",  # Allow Bambu Studio 3MF files with newer versions
             "--outputdir", str(workspace),
             str(three_mf_path)
@@ -215,6 +219,98 @@ class OrcaSlicer:
                 "max_z": metadata.max_z
             }
         }
+
+    def get_used_tools(self, gcode_path: Path) -> List[str]:
+        """Return sorted list of used tool commands (T0, T1, ...)."""
+        tool_re = re.compile(r"^T\d+$")
+        used = set()
+        with open(gcode_path, "r", errors="ignore") as f:
+            for line in f:
+                t = line.strip()
+                if tool_re.match(t):
+                    used.add(t)
+        return sorted(used)
+
+    def remap_compacted_tools(self, gcode_path: Path, target_tools: List[int]) -> Dict:
+        """Remap compacted T0..Tn tools to desired tool IDs.
+
+        Example: target_tools=[1,2] remaps T0->T1 and T1->T2.
+        """
+        if not target_tools:
+            return {"applied": False, "reason": "no_target_tools"}
+
+        with open(gcode_path, "r", errors="ignore") as f:
+            lines = f.readlines()
+
+        cmd_tool_re = re.compile(r"^\s*T(\d+)\s*$")
+        used_numbers = []
+        for line in lines:
+            m = cmd_tool_re.match(line)
+            if m:
+                used_numbers.append(int(m.group(1)))
+
+        if not used_numbers:
+            return {"applied": False, "reason": "no_tool_lines"}
+
+        compact = sorted(set(used_numbers))
+        expected_compact = list(range(len(target_tools)))
+        if compact != expected_compact:
+            return {
+                "applied": False,
+                "reason": "non_compact_tools",
+                "used": compact,
+                "expected": expected_compact,
+            }
+
+        tool_map = {i: target_tools[i] for i in range(len(target_tools))}
+        if all(src == dst for src, dst in tool_map.items()):
+            return {"applied": False, "reason": "identity_map", "map": tool_map}
+
+        m620_re = re.compile(r"^(\s*M620\s+S)(\d+)(A.*)$")
+        m621_re = re.compile(r"^(\s*M621\s+S)(\d+)(A.*)$")
+        t_param_re = re.compile(r"\bT(\d+)\b")
+
+        rewritten = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(";"):
+                rewritten.append(line)
+                continue
+
+            m_tool = cmd_tool_re.match(line)
+            if m_tool:
+                src_tool = int(m_tool.group(1))
+                dst_tool = tool_map.get(src_tool, src_tool)
+                rewritten.append(re.sub(r"T\d+", f"T{dst_tool}", line, count=1))
+                continue
+
+            s = line.strip()
+            m620 = m620_re.match(s)
+            if m620:
+                src_tool = int(m620.group(2))
+                dst_tool = tool_map.get(src_tool, src_tool)
+                rewritten.append(f"{m620.group(1)}{dst_tool}{m620.group(3)}\n")
+                continue
+
+            m621 = m621_re.match(s)
+            if m621:
+                src_tool = int(m621.group(2))
+                dst_tool = tool_map.get(src_tool, src_tool)
+                rewritten.append(f"{m621.group(1)}{dst_tool}{m621.group(3)}\n")
+                continue
+
+            # Remap generic T-parameters in commands like M104/M109 ... Tn
+            def _replace_t(match: re.Match) -> str:
+                src_tool = int(match.group(1))
+                dst_tool = tool_map.get(src_tool, src_tool)
+                return f"T{dst_tool}"
+
+            rewritten.append(t_param_re.sub(_replace_t, line))
+
+        with open(gcode_path, "w") as f:
+            f.writelines(rewritten)
+
+        return {"applied": True, "map": tool_map}
 
     def validate_bounds(self, gcode_path: Path, expected_bounds: Optional[Dict] = None) -> bool:
         """Verify G-code movements stay within printer build volume.

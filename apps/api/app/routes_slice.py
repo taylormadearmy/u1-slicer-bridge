@@ -4,6 +4,7 @@ import uuid
 import logging
 import shutil
 import re
+import json
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
@@ -17,31 +18,48 @@ from slicer import OrcaSlicer, SlicingError
 from profile_embedder import ProfileEmbedder, ProfileEmbedError
 from multi_plate_parser import parse_multi_plate_3mf, extract_plate_objects, get_plate_bounds
 from plate_validator import PlateValidator
+from parser_3mf import detect_colors_from_3mf, detect_active_extruders_from_3mf
 
 
 router = APIRouter(tags=["slicing"])
 logger = logging.getLogger(__name__)
 
 
+def get_filament_ids(request) -> List[int]:
+    """Get list of filament IDs from request, supporting both single and array."""
+    if request.filament_ids and len(request.filament_ids) > 0:
+        return request.filament_ids
+    elif request.filament_id:
+        return [request.filament_id]
+    else:
+        raise HTTPException(status_code=400, detail="filament_id or filament_ids required")
+
+
 class SliceRequest(BaseModel):
-    filament_id: int
+    filament_ids: Optional[List[int]] = None  # Multi-filament support (list of filament IDs)
+    filament_id: Optional[int] = None  # Single filament (for backward compatibility)
+    filament_colors: Optional[List[str]] = None  # Override colors per extruder (e.g., ["#FF0000", "#00FF00"])
     layer_height: Optional[float] = 0.2
     infill_density: Optional[int] = 15
     supports: Optional[bool] = False
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
+    extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
 
 class SlicePlateRequest(BaseModel):
     plate_id: int
-    filament_id: int
+    filament_ids: Optional[List[int]] = None  # Multi-filament support
+    filament_id: Optional[int] = None  # Single filament (backward compat)
+    filament_colors: Optional[List[str]] = None  # Override colors per extruder
     layer_height: Optional[float] = 0.2
     infill_density: Optional[int] = 15
     supports: Optional[bool] = False
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
+    extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
 
 def setup_job_logging(job_id: str) -> logging.Logger:
@@ -100,27 +118,77 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         if upload["bounds_warning"]:
             job_logger.warning(f"Plate has bounds warnings: {upload['bounds_warning']}")
 
-        # Validate filament exists
-        filament = await conn.fetchrow(
+        # Get filament IDs (supports both single and array)
+        filament_ids = get_filament_ids(request)
+        if len(filament_ids) > 4:
+            raise HTTPException(status_code=400, detail="U1 supports at most 4 extruders (max 4 filament_ids).")
+        
+        # Validate all filaments exist and fetch their settings
+        filament_rows = await conn.fetch(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index
             FROM filaments
-            WHERE id = $1
+            WHERE id = ANY($1)
             """,
-            request.filament_id
+            filament_ids
         )
 
-        if not filament:
-            job_logger.error(f"Filament {request.filament_id} not found")
-            raise HTTPException(status_code=404, detail="Filament not found")
+        if not filament_rows:
+            job_logger.error(f"No filaments found for IDs: {filament_ids}")
+            raise HTTPException(status_code=404, detail="One or more filaments not found")
 
-        job_logger.info(f"Using filament: {filament['name']} ({filament['material']})")
+        filament_by_id = {row["id"]: row for row in filament_rows}
+        missing_ids = [fid for fid in filament_ids if fid not in filament_by_id]
+        if missing_ids:
+            job_logger.error(f"One or more filaments not found: {missing_ids}")
+            raise HTTPException(status_code=404, detail="One or more filaments not found")
+
+        # Preserve request order and allow duplicate filament IDs
+        filaments = [filament_by_id[fid] for fid in filament_ids]
+
+        # Log filaments being used
+        filament_names = [f["name"] for f in filaments]
+        job_logger.info(f"Using filaments: {', '.join(filament_names)}")
 
         # Check original 3MF file exists
         source_3mf = Path(upload["file_path"])
         if not source_3mf.exists():
             job_logger.error(f"Source 3MF file not found: {source_3mf}")
             raise HTTPException(status_code=500, detail="Source 3MF file not found")
+
+        # Detect colors from 3MF file for viewer
+        detected_colors = []
+        try:
+            detected_colors = detect_colors_from_3mf(source_3mf)
+            job_logger.info(f"Detected colors from 3MF: {detected_colors}")
+        except Exception as e:
+            job_logger.warning(f"Could not detect colors from 3MF: {e}")
+
+        active_extruders = detect_active_extruders_from_3mf(source_3mf)
+        if active_extruders:
+            job_logger.info(f"Active assigned extruders: {active_extruders}")
+
+        extruder_remap = {}
+        if request.extruder_assignments and active_extruders:
+            for idx, src_ext in enumerate(active_extruders):
+                if idx >= len(request.extruder_assignments):
+                    break
+                dst_zero_based = request.extruder_assignments[idx]
+                dst_ext = int(dst_zero_based) + 1
+                if 1 <= dst_ext <= 4:
+                    extruder_remap[src_ext] = dst_ext
+            if extruder_remap:
+                job_logger.info(f"Applying extruder remap: {extruder_remap}")
+
+        multicolor_slot_count = len(active_extruders) if active_extruders else len(detected_colors)
+        if len(filaments) > 1 and multicolor_slot_count > 4:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model requires {multicolor_slot_count} color/extruder slots, but U1 supports up to 4. "
+                    "Use single-filament slicing or reduce colors to 4 or fewer."
+                ),
+            )
 
         # Create slicing job record
         await conn.execute(
@@ -143,29 +211,75 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
         embedded_3mf = workspace / "sliceable.3mf"
 
-        # Prepare filament settings
-        # Orca expects temperatures as arrays of strings, not integers
+        # Prepare filament settings for multi-extruder
+        # Orca expects temperatures as arrays of strings
         # Use request overrides if provided, otherwise use filament defaults
-        nozzle_temp = request.nozzle_temp if request.nozzle_temp is not None else filament["nozzle_temp"]
-        bed_temp = request.bed_temp if request.bed_temp is not None else filament["bed_temp"]
+        nozzle_temps = []
+        bed_temps = []
+        extruder_colors = []
+        material_types = []
+        profile_names = []
+        
+        # Get nozzle and bed temps from filaments or request overrides
+        for f in filaments:
+            nozzle_temps.append(str(request.nozzle_temp if request.nozzle_temp is not None else f["nozzle_temp"]))
+            bed_temps.append(str(request.bed_temp if request.bed_temp is not None else f["bed_temp"]))
+            extruder_colors.append(f.get("color_hex", "#FFFFFF"))
+            material_types.append(str(f.get("material", "PLA") or "PLA"))
+            profile_names.append(str(f.get("name", "Snapmaker PLA") or "Snapmaker PLA"))
+        
+        # Override colors if user specified custom colors per extruder
+        if request.filament_colors:
+            for idx, color in enumerate(request.filament_colors):
+                if idx < len(extruder_colors):
+                    extruder_colors[idx] = color
+        
+        # Pad to 4 extruders (use last values for unused extruders)
+        while len(nozzle_temps) < 4:
+            nozzle_temps.append(nozzle_temps[-1] if nozzle_temps else "200")
+        while len(bed_temps) < 4:
+            bed_temps.append(bed_temps[-1] if bed_temps else "60")
+        while len(extruder_colors) < 4:
+            extruder_colors.append("#FFFFFF")
+        while len(material_types) < 4:
+            material_types.append(material_types[-1] if material_types else "PLA")
+        while len(profile_names) < 4:
+            profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
+        
+        # Create extruder count setting (how many filaments we're using)
+        remap_slots = max(extruder_remap.values()) if extruder_remap else 0
+        extruder_count = max(len(filaments), remap_slots)
+        
+        # Get the first filament's bed type for the plate
+        first_filament = filaments[0]
+        bed_type = request.bed_type if request.bed_type is not None else first_filament.get("bed_type", "PEI")
 
         filament_settings = {
-            "nozzle_temperature": [str(nozzle_temp)] * 4,  # U1 has 4 extruders
-            "nozzle_temperature_initial_layer": [str(nozzle_temp)] * 4,
-            "bed_temperature": [str(bed_temp)] * 4,
-            "bed_temperature_initial_layer": [str(bed_temp)] * 4,
-            "bed_temperature_initial_layer_single": str(bed_temp),  # Used in printer start gcode
-            # Also set cool_plate_temp - Orca uses this for PEI plates
-            "cool_plate_temp": [str(bed_temp)] * 4,
-            "cool_plate_temp_initial_layer": [str(bed_temp)] * 4,
-            "textured_plate_temp": [str(bed_temp)] * 4,
-            "textured_plate_temp_initial_layer": [str(bed_temp)] * 4,
+            "nozzle_temperature": nozzle_temps,
+            "nozzle_temperature_initial_layer": nozzle_temps,
+            "bed_temperature": bed_temps,
+            "bed_temperature_initial_layer": bed_temps,
+            "bed_temperature_initial_layer_single": bed_temps[0],
+            "cool_plate_temp": bed_temps,
+            "cool_plate_temp_initial_layer": bed_temps,
+            "textured_plate_temp": bed_temps,
+            "textured_plate_temp_initial_layer": bed_temps,
         }
 
+        if extruder_count > 1:
+            filament_settings.update({
+                "filament_type": material_types,
+                "filament_colour": extruder_colors,
+                "extruder_colour": extruder_colors,
+                "default_filament_profile": profile_names,
+                "filament_settings_id": profile_names,
+            })
+
         # Add bed type if specified in request
-        bed_type = request.bed_type if request.bed_type is not None else filament.get("bed_type", "PEI")
         if bed_type:
             filament_settings["default_bed_type"] = bed_type
+
+        job_logger.info(f"Using temps: nozzle={nozzle_temps}, bed={bed_temps}, bed_type={bed_type}, extruders={extruder_count}")
 
         # Prepare overrides from request
         overrides = {}
@@ -177,14 +291,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["enable_support"] = "1"
             overrides["support_type"] = "normal(auto)"
 
-        job_logger.info(f"Using temps: nozzle={nozzle_temp}°C, bed={bed_temp}°C, bed_type={bed_type}")
-
         try:
             embedder.embed_profiles(
                 source_3mf=source_3mf,
                 output_3mf=embedded_3mf,
                 filament_settings=filament_settings,
-                overrides=overrides
+                overrides=overrides,
+                requested_filament_count=extruder_count,
+                extruder_remap=None,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -217,9 +331,27 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         gcode_workspace_path = gcode_files[0]
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
+        if len(filaments) > 1 and extruder_remap:
+            ordered_sources = sorted(extruder_remap.keys())
+            target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+            remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
+            if remap_result.get("applied"):
+                job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
+            else:
+                job_logger.info(f"Tool remap skipped: {remap_result}")
+
         # Parse G-code metadata
         job_logger.info("Parsing G-code metadata...")
         metadata = slicer.parse_gcode_metadata(gcode_workspace_path)
+        used_tools = slicer.get_used_tools(gcode_workspace_path)
+        job_logger.info(f"Tools used in G-code: {used_tools}")
+
+        # Strict validation: when multicolor is requested, output must use T1+
+        if len(filaments) > 1 and all(t == "T0" for t in used_tools):
+            raise SlicingError(
+                "Multicolour requested, but slicer produced single-tool G-code (T0 only)."
+            )
+
         job_logger.info(f"Metadata: time={metadata['estimated_time_seconds']}s, "
                        f"filament={metadata['filament_used_mm']}mm, "
                        f"layers={metadata.get('layer_count', 'N/A')}")
@@ -247,6 +379,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
         # Update database with results
+        filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -258,7 +391,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                     estimated_time_seconds = $5,
                     filament_used_mm = $6,
                     layer_count = $7,
-                    three_mf_path = $8
+                    three_mf_path = $8,
+                    filament_colors = $9
                 WHERE job_id = $1
                 """,
                 job_id,
@@ -268,17 +402,28 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 metadata['estimated_time_seconds'],
                 metadata['filament_used_mm'],
                 metadata.get('layer_count'),
-                str(embedded_3mf)
+                str(embedded_3mf),
+                filament_colors_json
             )
 
         job_logger.info(f"Slicing job {job_id} completed successfully")
 
+        # Determine display colors: override > detected > filament defaults
+        if request.filament_colors:
+            display_colors = request.filament_colors
+        elif detected_colors:
+            display_colors = detected_colors
+        else:
+            display_colors = json.loads(filament_colors_json)
+        
         return {
             "job_id": job_id,
             "status": "completed",
             "gcode_path": str(final_gcode_path),
             "gcode_size": gcode_size,
             "gcode_size_mb": round(gcode_size_mb, 2),
+            "filament_colors": display_colors,
+            "detected_colors": detected_colors,
             "metadata": {
                 "estimated_time_seconds": metadata['estimated_time_seconds'],
                 "filament_used_mm": metadata['filament_used_mm'],
@@ -288,7 +433,13 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         }
 
     except SlicingError as e:
-        job_logger.error(f"Slicing failed: {str(e)}")
+        err_text = str(e)
+        if len(filaments) > 1 and "segmentation fault" in err_text.lower():
+            err_text = (
+                "Multicolour slicing is unstable for this model in Snapmaker Orca v2.2.4 "
+                "(slicer crash). Try single-filament slicing for now."
+            )
+        job_logger.error(f"Slicing failed: {err_text}")
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -301,9 +452,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 """,
                 job_id,
                 datetime.utcnow(),
-                str(e)
+                err_text
             )
-        raise HTTPException(status_code=500, detail=f"Slicing failed: {str(e)}")
+        code = 400 if "unstable for this model" in err_text else 500
+        raise HTTPException(status_code=code, detail=f"Slicing failed: {err_text}")
 
     except Exception as e:
         job_logger.error(f"Unexpected error: {str(e)}")
@@ -372,6 +524,14 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"Source 3MF file not found: {source_3mf}")
             raise HTTPException(status_code=500, detail="Source 3MF file not found")
 
+        # Detect colors from 3MF file for viewer
+        detected_colors = []
+        try:
+            detected_colors = detect_colors_from_3mf(source_3mf)
+            job_logger.info(f"Detected colors from 3MF: {detected_colors}")
+        except Exception as e:
+            job_logger.warning(f"Could not detect colors from 3MF: {e}")
+
         plates, is_multi_plate = parse_multi_plate_3mf(source_3mf)
         if not is_multi_plate:
             job_logger.error(f"Upload {upload_id} is not a multi-plate file")
@@ -393,21 +553,63 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
 
         job_logger.info(f"Found plate {request.plate_id}: Object {target_plate.object_id}")
 
-        # Validate filament exists
-        filament = await conn.fetchrow(
+        # Get filament IDs (supports both single and array)
+        filament_ids = get_filament_ids(request)
+        if len(filament_ids) > 4:
+            raise HTTPException(status_code=400, detail="U1 supports at most 4 extruders (max 4 filament_ids).")
+        
+        # Validate all filaments exist and fetch their settings
+        filament_rows = await conn.fetch(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index
             FROM filaments
-            WHERE id = $1
+            WHERE id = ANY($1)
             """,
-            request.filament_id
+            filament_ids
         )
 
-        if not filament:
-            job_logger.error(f"Filament {request.filament_id} not found")
-            raise HTTPException(status_code=404, detail="Filament not found")
+        if not filament_rows:
+            job_logger.error(f"No filaments found for IDs: {filament_ids}")
+            raise HTTPException(status_code=404, detail="One or more filaments not found")
 
-        job_logger.info(f"Using filament: {filament['name']} ({filament['material']})")
+        filament_by_id = {row["id"]: row for row in filament_rows}
+        missing_ids = [fid for fid in filament_ids if fid not in filament_by_id]
+        if missing_ids:
+            job_logger.error(f"One or more filaments not found: {missing_ids}")
+            raise HTTPException(status_code=404, detail="One or more filaments not found")
+
+        # Preserve request order and allow duplicate filament IDs
+        filaments = [filament_by_id[fid] for fid in filament_ids]
+
+        active_extruders = detect_active_extruders_from_3mf(source_3mf)
+        if active_extruders:
+            job_logger.info(f"Active assigned extruders: {active_extruders}")
+
+        extruder_remap = {}
+        if request.extruder_assignments and active_extruders:
+            for idx, src_ext in enumerate(active_extruders):
+                if idx >= len(request.extruder_assignments):
+                    break
+                dst_zero_based = request.extruder_assignments[idx]
+                dst_ext = int(dst_zero_based) + 1
+                if 1 <= dst_ext <= 4:
+                    extruder_remap[src_ext] = dst_ext
+            if extruder_remap:
+                job_logger.info(f"Applying extruder remap: {extruder_remap}")
+
+        multicolor_slot_count = len(active_extruders) if active_extruders else len(detected_colors)
+        if len(filaments) > 1 and multicolor_slot_count > 4:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model requires {multicolor_slot_count} color/extruder slots, but U1 supports up to 4. "
+                    "Use single-filament slicing or reduce colors to 4 or fewer."
+                ),
+            )
+        
+        # Log filaments being used
+        filament_names = [f["name"] for f in filaments]
+        job_logger.info(f"Using filaments: {', '.join(filament_names)}")
 
         # Validate plate bounds
         printer_profile = get_printer_profile("snapmaker_u1")
@@ -434,41 +636,75 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         workspace.mkdir(parents=True, exist_ok=True)
         job_logger.info(f"Created workspace: {workspace}")
 
-        # Extract the selected plate to a new 3MF file
-        from multi_plate_parser import extract_plate_to_3mf
-        
-        plate_3mf = workspace / "plate_extracted.3mf"
-        job_logger.info(f"Extracting plate {request.plate_id} from 3MF...")
-        extract_plate_to_3mf(source_3mf, request.plate_id, plate_3mf)
-        
         embedded_3mf = workspace / "sliceable.3mf"
 
-        # Embed profiles into extracted plate 3MF
+        # Embed profiles into source 3MF and slice only selected plate via CLI
         job_logger.info("Embedding Orca profiles into 3MF...")
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
 
-        # Prepare filament settings
-        # Use request overrides if provided, otherwise use filament defaults
-        nozzle_temp = request.nozzle_temp if request.nozzle_temp is not None else filament["nozzle_temp"]
-        bed_temp = request.bed_temp if request.bed_temp is not None else filament["bed_temp"]
+        # Prepare filament settings for multi-extruder
+        nozzle_temps = []
+        bed_temps = []
+        extruder_colors = []
+        material_types = []
+        profile_names = []
+        
+        for f in filaments:
+            nozzle_temps.append(str(request.nozzle_temp if request.nozzle_temp is not None else f["nozzle_temp"]))
+            bed_temps.append(str(request.bed_temp if request.bed_temp is not None else f["bed_temp"]))
+            extruder_colors.append(f.get("color_hex", "#FFFFFF"))
+            material_types.append(str(f.get("material", "PLA") or "PLA"))
+            profile_names.append(str(f.get("name", "Snapmaker PLA") or "Snapmaker PLA"))
+        
+        # Override colors if user specified custom colors per extruder
+        if request.filament_colors:
+            for idx, color in enumerate(request.filament_colors):
+                if idx < len(extruder_colors):
+                    extruder_colors[idx] = color
+        
+        # Pad to 4 extruders
+        while len(nozzle_temps) < 4:
+            nozzle_temps.append(nozzle_temps[-1] if nozzle_temps else "200")
+        while len(bed_temps) < 4:
+            bed_temps.append(bed_temps[-1] if bed_temps else "60")
+        while len(extruder_colors) < 4:
+            extruder_colors.append("#FFFFFF")
+        while len(material_types) < 4:
+            material_types.append(material_types[-1] if material_types else "PLA")
+        while len(profile_names) < 4:
+            profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
+        
+        remap_slots = max(extruder_remap.values()) if extruder_remap else 0
+        extruder_count = max(len(filaments), remap_slots)
+        first_filament = filaments[0]
+        bed_type = request.bed_type if request.bed_type is not None else first_filament.get("bed_type", "PEI")
 
         filament_settings = {
-            "nozzle_temperature": [str(nozzle_temp)] * 4,
-            "nozzle_temperature_initial_layer": [str(nozzle_temp)] * 4,
-            "bed_temperature": [str(bed_temp)] * 4,
-            "bed_temperature_initial_layer": [str(bed_temp)] * 4,
-            "bed_temperature_initial_layer_single": str(bed_temp),  # Used in printer start gcode
-            # Also set cool_plate_temp - Orca uses this for PEI plates
-            "cool_plate_temp": [str(bed_temp)] * 4,
-            "cool_plate_temp_initial_layer": [str(bed_temp)] * 4,
-            "textured_plate_temp": [str(bed_temp)] * 4,
-            "textured_plate_temp_initial_layer": [str(bed_temp)] * 4,
+            "nozzle_temperature": nozzle_temps,
+            "nozzle_temperature_initial_layer": nozzle_temps,
+            "bed_temperature": bed_temps,
+            "bed_temperature_initial_layer": bed_temps,
+            "bed_temperature_initial_layer_single": bed_temps[0],
+            "cool_plate_temp": bed_temps,
+            "cool_plate_temp_initial_layer": bed_temps,
+            "textured_plate_temp": bed_temps,
+            "textured_plate_temp_initial_layer": bed_temps,
         }
 
+        if extruder_count > 1:
+            filament_settings.update({
+                "filament_type": material_types,
+                "filament_colour": extruder_colors,
+                "extruder_colour": extruder_colors,
+                "default_filament_profile": profile_names,
+                "filament_settings_id": profile_names,
+            })
+
         # Add bed type if specified in request
-        bed_type = request.bed_type if request.bed_type is not None else filament.get("bed_type", "PEI")
         if bed_type:
             filament_settings["default_bed_type"] = bed_type
+
+        job_logger.info(f"Using temps: nozzle={nozzle_temps}, bed={bed_temps}, bed_type={bed_type}, extruders={extruder_count}")
 
         # Prepare overrides from request
         overrides = {}
@@ -480,14 +716,14 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["enable_support"] = "1"
             overrides["support_type"] = "normal(auto)"
 
-        job_logger.info(f"Using temps: nozzle={nozzle_temp}°C, bed={bed_temp}°C, bed_type={bed_type}")
-
         try:
             embedder.embed_profiles(
-                source_3mf=plate_3mf,
+                source_3mf=source_3mf,
                 output_3mf=embedded_3mf,
                 filament_settings=filament_settings,
-                overrides=overrides
+                overrides=overrides,
+                requested_filament_count=extruder_count,
+                extruder_remap=None,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -499,7 +735,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
 
-        result = slicer.slice_3mf(embedded_3mf, workspace)
+        result = slicer.slice_3mf(embedded_3mf, workspace, plate_index=request.plate_id)
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -519,9 +755,27 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         gcode_workspace_path = gcode_files[0]
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
+        if len(filaments) > 1 and extruder_remap:
+            ordered_sources = sorted(extruder_remap.keys())
+            target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+            remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
+            if remap_result.get("applied"):
+                job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
+            else:
+                job_logger.info(f"Tool remap skipped: {remap_result}")
+
         # Parse G-code metadata
         job_logger.info("Parsing G-code metadata...")
         metadata = slicer.parse_gcode_metadata(gcode_workspace_path)
+        used_tools = slicer.get_used_tools(gcode_workspace_path)
+        job_logger.info(f"Tools used in G-code: {used_tools}")
+
+        # Strict validation: when multicolor is requested, output must use T1+
+        if len(filaments) > 1 and all(t == "T0" for t in used_tools):
+            raise SlicingError(
+                "Multicolour requested, but slicer produced single-tool G-code (T0 only)."
+            )
+
         job_logger.info(f"Metadata: time={metadata['estimated_time_seconds']}s, "
                        f"filament={metadata['filament_used_mm']}mm, "
                        f"layers={metadata.get('layer_count', 'N/A')}")
@@ -545,6 +799,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
         # Update database with results
+        filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -556,7 +811,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                     estimated_time_seconds = $5,
                     filament_used_mm = $6,
                     layer_count = $7,
-                    three_mf_path = $8
+                    three_mf_path = $8,
+                    filament_colors = $9
                 WHERE job_id = $1
                 """,
                 job_id,
@@ -566,11 +822,20 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 metadata['estimated_time_seconds'],
                 metadata['filament_used_mm'],
                 metadata.get('layer_count'),
-                str(embedded_3mf)
+                str(embedded_3mf),
+                filament_colors_json
             )
 
         job_logger.info(f"Plate slicing job {job_id} completed successfully")
 
+        # Determine display colors: override > detected > filament defaults
+        if request.filament_colors:
+            display_colors = request.filament_colors
+        elif detected_colors:
+            display_colors = detected_colors
+        else:
+            display_colors = json.loads(filament_colors_json)
+        
         return {
             "job_id": job_id,
             "status": "completed",
@@ -578,6 +843,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             "gcode_path": str(final_gcode_path),
             "gcode_size": gcode_size,
             "gcode_size_mb": round(gcode_size_mb, 2),
+            "filament_colors": display_colors,
+            "detected_colors": detected_colors,
             "plate_validation": plate_validation,
             "metadata": {
                 "estimated_time_seconds": metadata['estimated_time_seconds'],
@@ -588,7 +855,13 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         }
 
     except SlicingError as e:
-        job_logger.error(f"Plate slicing failed: {str(e)}")
+        err_text = str(e)
+        if len(filaments) > 1 and "segmentation fault" in err_text.lower():
+            err_text = (
+                "Multicolour slicing is unstable for this model in Snapmaker Orca v2.2.4 "
+                "(slicer crash). Try single-filament slicing for now."
+            )
+        job_logger.error(f"Plate slicing failed: {err_text}")
         # Update job status to failed
         async with pool.acquire() as conn:
             await conn.execute(
@@ -601,9 +874,10 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 """,
                 job_id,
                 datetime.utcnow(),
-                str(e)
+                err_text
             )
-        raise HTTPException(status_code=500, detail=f"Plate slicing failed: {str(e)}")
+        code = 400 if "unstable for this model" in err_text else 500
+        raise HTTPException(status_code=code, detail=f"Plate slicing failed: {err_text}")
 
     except Exception as e:
         job_logger.error(f"Unexpected error: {str(e)}")
@@ -710,7 +984,7 @@ async def get_slicing_job(job_id: str):
             """
             SELECT job_id, upload_id, status, started_at, completed_at,
                    gcode_path, gcode_size, estimated_time_seconds, filament_used_mm,
-                   layer_count, error_message
+                   layer_count, filament_colors, error_message
             FROM slicing_jobs
             WHERE job_id = $1
             """,
@@ -719,6 +993,13 @@ async def get_slicing_job(job_id: str):
 
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+    filament_colors = []
+    if job["filament_colors"]:
+        try:
+            filament_colors = json.loads(job["filament_colors"])
+        except:
+            pass
 
     result = {
         "job_id": job["job_id"],
@@ -729,6 +1010,7 @@ async def get_slicing_job(job_id: str):
         "gcode_path": job["gcode_path"],
         "gcode_size": job["gcode_size"],
         "gcode_size_mb": round(job["gcode_size"] / 1024 / 1024, 2) if job["gcode_size"] else None,
+        "filament_colors": filament_colors,
         "error_message": job["error_message"]
     }
 
@@ -899,6 +1181,25 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
     layer_moves = []
 
     pattern = re.compile(r'([GXYZEF])([\d.-]+)')
+    layer_comment_re = re.compile(r'^;\s*(LAYER_CHANGE|CHANGE_LAYER)\b', re.IGNORECASE)
+    layer_number_re = re.compile(r'^;\s*LAYER\s*:\s*(\d+)\b', re.IGNORECASE)
+
+    def flush_layer() -> bool:
+        """Flush current buffered moves if layer is in range.
+
+        Returns True when requested count has been reached.
+        """
+        nonlocal layers, layer_moves, current_layer
+        if current_layer >= start and layer_moves:
+            layers.append({
+                "layer_num": current_layer,
+                "z_height": current_z,
+                "moves": layer_moves
+            })
+            layer_moves = []
+            if len(layers) >= count:
+                return True
+        return False
 
     try:
         with open(gcode_path, 'r') as f:
@@ -906,19 +1207,17 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
                 line = line.strip()
 
                 # Detect layer changes
-                if line.startswith(";LAYER_CHANGE"):
-                    if current_layer >= start and layer_moves:
-                        layers.append({
-                            "layer_num": current_layer,
-                            "z_height": current_z,
-                            "moves": layer_moves
-                        })
-
-                        if len(layers) >= count:
-                            break
-
+                if layer_comment_re.match(line):
+                    if flush_layer():
+                        break
                     current_layer += 1
-                    layer_moves = []
+                    continue
+
+                layer_number_match = layer_number_re.match(line)
+                if layer_number_match:
+                    if flush_layer():
+                        break
+                    current_layer = int(layer_number_match.group(1))
                     continue
 
                 # Skip if not in range
@@ -955,15 +1254,78 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
                     last_x, last_y = x, y
 
             # Add final layer if in range
-            if current_layer >= start and layer_moves and len(layers) < count:
-                layers.append({
-                    "layer_num": current_layer,
-                    "z_height": current_z,
-                    "moves": layer_moves
-                })
+            if len(layers) < count:
+                flush_layer()
 
     except Exception as e:
         logger.error(f"Failed to parse G-code layers: {e}")
         raise HTTPException(status_code=500, detail="Failed to parse G-code")
 
     return layers
+
+
+@router.get("/jobs")
+async def list_all_jobs():
+    """List all slicing jobs with upload information."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        jobs = await conn.fetch("""
+            SELECT 
+                sj.job_id,
+                sj.upload_id,
+                u.filename,
+                sj.status,
+                sj.gcode_size,
+                sj.estimated_time_seconds,
+                sj.filament_used_mm,
+                sj.layer_count,
+                sj.started_at,
+                sj.completed_at
+            FROM slicing_jobs sj
+            JOIN uploads u ON sj.upload_id = u.id
+            ORDER BY sj.completed_at DESC NULLS LAST
+        """)
+        
+        return [{
+            "job_id": job["job_id"],
+            "upload_id": job["upload_id"],
+            "filename": job["filename"],
+            "status": job["status"],
+            "gcode_size": job["gcode_size"] or 0,
+            "estimated_time_seconds": job["estimated_time_seconds"] or 0,
+            "filament_used_mm": job["filament_used_mm"] or 0,
+            "layer_count": job["layer_count"] or 0,
+            "started_at": job["started_at"].isoformat() if job["started_at"] else None,
+            "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None
+        } for job in jobs]
+
+
+@router.delete("/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """Delete a single slicing job and its G-code file."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        # Get job info first
+        job = await conn.fetchrow(
+            "SELECT gcode_path FROM slicing_jobs WHERE job_id = $1",
+            job_id
+        )
+        
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Delete G-code file if exists
+        if job["gcode_path"]:
+            gcode_path = Path(job["gcode_path"])
+            if gcode_path.exists():
+                gcode_path.unlink()
+        
+        # Delete log file if exists
+        log_path = Path(f"/data/logs/slice_{job_id}.log")
+        if log_path.exists():
+            log_path.unlink()
+        
+        # Delete from database
+        await conn.execute("DELETE FROM slicing_jobs WHERE job_id = $1", job_id)
+    
+    return {"message": "Job deleted successfully"}

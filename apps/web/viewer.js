@@ -3,12 +3,13 @@
  * Mobile-first Alpine.js component
  */
 
-function gcodeViewer(initialJobId) {
+function gcodeViewer(initialJobId, initialFilamentColors = null) {
     return {
         // Canvas and rendering
         canvas: null,
         ctx: null,
         jobId: initialJobId || null,
+        filamentColors: initialFilamentColors || [],
 
         // Layer data
         currentLayer: 0,
@@ -34,6 +35,17 @@ function gcodeViewer(initialJobId) {
                 console.warn('Viewer mounted without job ID');
                 this.error = 'No job ID provided';
                 return;
+            }
+
+            // Fetch job to get filament colors if not provided
+            if (!this.filamentColors || this.filamentColors.length === 0) {
+                try {
+                    const job = await api.getJobStatus(this.jobId);
+                    this.filamentColors = job.filament_colors || [];
+                    console.log('Loaded filament colors:', this.filamentColors);
+                } catch (e) {
+                    console.warn('Could not fetch filament colors:', e);
+                }
             }
 
             // Wait for next frame to ensure DOM has laid out
@@ -376,7 +388,11 @@ function gcodeViewer(initialJobId) {
          * Draw extrusion move (printing)
          */
         drawExtrusion(move) {
-            this.ctx.strokeStyle = '#3b82f6';  // Blue
+            // Use filament color if available, otherwise default blue
+            const color = this.filamentColors && this.filamentColors.length > 0 
+                ? this.filamentColors[0]  // Use first filament color
+                : '#3b82f6';
+            this.ctx.strokeStyle = color;
             this.ctx.lineWidth = 2;
             this.ctx.beginPath();
             this.ctx.moveTo(
