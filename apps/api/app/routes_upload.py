@@ -1,12 +1,16 @@
 import os
 import uuid
+import logging
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from db import get_pg_pool
+
+logger = logging.getLogger(__name__)
 from parser_3mf import parse_3mf
 from plate_validator import PlateValidator, PlateValidationError
 from config import get_printer_profile
+from multi_plate_parser import parse_multi_plate_3mf
 
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -40,7 +44,15 @@ async def upload_3mf(file: UploadFile = File(...)):
 
     # Parse .3mf and extract object metadata (for informational purposes)
     try:
-        objects = parse_3mf(file_path)
+        # Check if this is a multi-plate file
+        plates, is_multi_plate = parse_multi_plate_3mf(file_path)
+        
+        if is_multi_plate:
+            # For multi-plate files, we still extract basic object count
+            # using the existing parser for backward compatibility
+            objects = parse_3mf(file_path)
+        else:
+            objects = parse_3mf(file_path)
     except ValueError as e:
         # Clean up failed upload
         file_path.unlink(missing_ok=True)
@@ -71,6 +83,7 @@ async def upload_3mf(file: UploadFile = File(...)):
         # Insert upload record with plate bounds
         bounds = validation['bounds']
         warnings_text = '\n'.join(validation['warnings']) if validation['warnings'] else None
+        is_multi_plate = validation.get('is_multi_plate', False)
 
         upload_id = await conn.fetchval(
             """
@@ -91,7 +104,7 @@ async def upload_3mf(file: UploadFile = File(...)):
             warnings_text
         )
 
-    return {
+    response = {
         "upload_id": upload_id,
         "filename": file.filename,
         "file_size": len(content),
@@ -100,6 +113,38 @@ async def upload_3mf(file: UploadFile = File(...)):
         "warnings": validation['warnings'],
         "fits": validation['fits']
     }
+    
+    # Add multi-plate information if applicable
+    if validation.get('is_multi_plate'):
+        response.update({
+            "is_multi_plate": True,
+            "plates": validation['plates'],
+            "plate_count": len(validation['plates'])
+        })
+        
+        # Validate each individual plate
+        plate_validations = []
+        for plate in validation['plates']:
+            try:
+                plate_id = plate['plate_id']
+                plate_validation = validator.validate_3mf_bounds(file_path, plate_id)
+                plate_validations.append({
+                    "plate_id": plate['plate_id'],
+                    "bounds": plate_validation['bounds'],
+                    "warnings": plate_validation['warnings'],
+                    "fits": plate_validation['fits']
+                })
+            except Exception as e:
+                logger.error(f"Failed to validate plate {plate['plate_id']}: {str(e)}")
+                plate_validations.append({
+                    "plate_id": plate['plate_id'],
+                    "error": str(e),
+                    "fits": False
+                })
+        
+        response["plate_validations"] = plate_validations
+    
+    return response
 
 
 @router.get("/{upload_id}")

@@ -18,6 +18,9 @@ function app() {
         filaments: [],
         selectedUpload: null,     // Current upload object
         selectedFilament: null,   // Selected filament ID
+        selectedPlate: null,       // Selected plate ID for multi-plate files
+        plates: [],               // Available plates for selected upload
+        platesLoading: false,     // Loading state for plates
 
         // Printer status
         printerConnected: false,
@@ -28,6 +31,9 @@ function app() {
             layer_height: 0.2,
             infill_density: 15,
             supports: false,
+            nozzle_temp: null,
+            bed_temp: null,
+            bed_type: null,
         },
 
         // Results
@@ -145,11 +151,17 @@ function app() {
             this.uploadProgress = 0;
 
             try {
+                console.log('🔄 Starting upload...');
                 const result = await api.uploadFile(file, (progress) => {
                     this.uploadProgress = progress;
+                    console.log(`📤 Upload progress: ${progress}%`);
                 });
 
-                console.log('Upload complete:', result);
+                console.log('✅ Upload complete:', result);
+                console.log('   - is_multi_plate:', result.is_multi_plate);
+                console.log('   - plates:', result.plates?.length);
+                console.log('   - plate_count:', result.plate_count);
+                
                 this.uploadProgress = 0;
 
                 // Add to uploads list
@@ -157,12 +169,48 @@ function app() {
 
                 // Select this upload and move to configure step
                 this.selectedUpload = result;
+                this.selectedPlate = null;
+                this.plates = [];
+                this.platesLoading = false;
                 this.currentStep = 'configure';
 
                 // Auto-select default filament
                 const defaultFilament = this.filaments.find(f => f.is_default);
                 if (defaultFilament) {
                     this.selectedFilament = defaultFilament.id;
+                }
+                
+                // Check if upload response already has multi-plate data (it does from the API!)
+                if (result.is_multi_plate && result.plates && result.plates.length > 0) {
+                    this.plates = result.plates;
+                    this.selectedUpload.is_multi_plate = true;
+                    this.selectedUpload.plate_count = result.plate_count;
+                    console.log(`✅ Using ${this.plates.length} plates from upload response`);
+                } else {
+                    // Not in upload response - try loading separately
+                    console.log('📋 Multi-plate data not in upload response, loading separately...');
+                    this.platesLoading = true;
+                    this.plates = [];
+                    try {
+                        const platesData = await api.getUploadPlates(result.upload_id);
+                        this.platesLoading = false;
+                        
+                        if (platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
+                            this.selectedUpload.is_multi_plate = true;
+                            this.selectedUpload.plate_count = platesData.plate_count;
+                            this.plates = platesData.plates;
+                            console.log(`✅ Loaded ${this.plates.length} plates for new upload`);
+                        } else {
+                            this.selectedUpload.is_multi_plate = false;
+                            this.plates = [];
+                            console.log('Single plate file');
+                        }
+                    } catch (err) {
+                        this.platesLoading = false;
+                        this.selectedUpload.is_multi_plate = false;
+                        this.plates = [];
+                        console.warn('Could not load plates for new upload:', err);
+                    }
                 }
             } catch (err) {
                 this.uploadProgress = 0;
@@ -171,14 +219,18 @@ function app() {
             }
         },
 
-        /**
+/**
          * Select an existing upload (from recent uploads list)
          */
-        selectUpload(upload) {
+        async selectUpload(upload) {
             console.log('Selected upload:', upload.upload_id);
             this.selectedUpload = upload;
+            this.selectedPlate = null;  // Reset plate selection
+            this.plates = [];          // Reset plates list
+            this.platesLoading = true; // Set loading state
+            
             this.currentStep = 'configure';
-
+            
             // Auto-select default filament if not already selected
             if (!this.selectedFilament) {
                 const defaultFilament = this.filaments.find(f => f.is_default);
@@ -186,6 +238,83 @@ function app() {
                     this.selectedFilament = defaultFilament.id;
                 }
             }
+            
+            // Try to load plates - this works for both multi-plate and single-plate files
+            // If it's multi-plate, we'll get plates data; if single, we'll get empty plates
+            try {
+                console.log('Loading plates for upload:', upload.upload_id);
+                
+                // Add timeout wrapper
+                const platesDataPromise = api.getUploadPlates(upload.upload_id);
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('API timeout')), 10000)
+                );
+                
+                const platesData = await Promise.race([platesDataPromise, timeoutPromise]);
+                console.log('Plates data received:', platesData);
+                this.platesLoading = false;
+                
+                if (platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
+                    // Update the selected upload with multi-plate info
+                    this.selectedUpload.is_multi_plate = true;
+                    this.selectedUpload.plate_count = platesData.plate_count;
+                    this.plates = platesData.plates;
+                    console.log(`✅ Loaded ${this.plates.length} plates for upload ${upload.upload_id}`);
+                } else {
+                    // Single plate file - that's fine
+                    this.selectedUpload.is_multi_plate = false;
+                    this.plates = [];
+                    console.log('Single plate file - no plates to load');
+                    console.log('Single plate file');
+                }
+            } catch (err) {
+                console.error('❌ Could not load plates:', err.message, err);
+                this.platesLoading = false;
+                this.selectedUpload.is_multi_plate = false;
+                this.plates = [];
+            }
+        },
+
+        /**
+         * Load plates for a multi-plate upload
+         */
+        async loadPlates(uploadId) {
+            // Guard against undefined uploadId - try to get it from selectedUpload
+            if (!uploadId) {
+                uploadId = this.selectedUpload?.upload_id;
+                if (!uploadId) {
+                    console.warn('loadPlates called with undefined uploadId and no selectedUpload');
+                    return;
+                }
+            }
+            
+            try {
+                const response = await api.getUploadPlates(uploadId);
+                this.plates = response.plates || [];
+                console.log(`Loaded ${this.plates.length} plates for upload ${uploadId}`);
+                
+                // Auto-select the first plate that fits and is printable
+                const firstFitPlate = this.plates.find(p => p.validation && p.validation.fits && p.printable);
+                if (firstFitPlate) {
+                    this.selectedPlate = firstFitPlate.plate_id;
+                    console.log('Auto-selected first valid plate:', firstFitPlate.plate_id);
+                } else if (this.plates.length > 0) {
+                    // Fallback to first plate if none fit
+                    this.selectedPlate = this.plates[0].plate_id;
+                    console.log('No plates fit build volume, selected first plate:', this.selectedPlate);
+                }
+            } catch (err) {
+                console.error('Failed to load plates:', err);
+                this.showError('Failed to load plate information');
+            }
+        },
+
+        /**
+         * Select a plate for slicing
+         */
+        selectPlate(plateId) {
+            this.selectedPlate = plateId;
+            console.log('Selected plate:', plateId);
         },
 
         /**
@@ -197,17 +326,42 @@ function app() {
                 return;
             }
 
-            console.log('Starting slice for upload:', this.selectedUpload.upload_id);
+            // For multi-plate files, require plate selection
+            if (this.selectedUpload.is_multi_plate && !this.selectedPlate) {
+                this.showError('Please select a plate to slice');
+                return;
+            }
+
+            // Capture current upload info before starting (in case selection changes)
+            const uploadId = this.selectedUpload.upload_id;
+            const filename = this.selectedUpload.filename;
+            const isMultiPlate = this.selectedUpload.is_multi_plate;
+            const selectedPlateId = this.selectedPlate;
+            
+            console.log(`Starting slice for: ${filename} (ID: ${uploadId}, multi-plate: ${isMultiPlate}, plate: ${selectedPlateId})`);
             console.log('Settings:', this.sliceSettings);
 
             this.currentStep = 'slicing';
             this.sliceProgress = 0;
 
             try {
-                const result = await api.sliceUpload(this.selectedUpload.upload_id, {
-                    filament_id: this.selectedFilament,
-                    ...this.sliceSettings
-                });
+                let result;
+                
+                if (isMultiPlate) {
+                    // Slice specific plate
+                    console.log(`Slicing plate ${selectedPlateId} from upload ${uploadId}`);
+                    result = await api.slicePlate(uploadId, selectedPlateId, {
+                        filament_id: this.selectedFilament,
+                        ...this.sliceSettings
+                    });
+                } else {
+                    // Slice regular upload
+                    console.log(`Slicing upload ${uploadId}`);
+                    result = await api.sliceUpload(uploadId, {
+                        filament_id: this.selectedFilament,
+                        ...this.sliceSettings
+                    });
+                }
 
                 console.log('Slice started:', result);
 

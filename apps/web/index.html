@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>U1 Slicer Bridge</title>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com/3.4.0"></script>
     <style>
         [x-cloak] { display: none !important; }
         .drag-over { @apply border-blue-500 bg-blue-50; }
@@ -149,11 +149,76 @@
                         <h3 class="font-medium text-gray-900 mb-2">Selected File</h3>
                         <p class="text-sm text-gray-700" x-text="selectedUpload?.filename"></p>
                         <p class="text-xs text-gray-500 mt-1" x-text="`${(selectedUpload?.file_size / 1024 / 1024).toFixed(2)} MB`"></p>
+                        
+                        <!-- Multi-plate indicator -->
+                        <template x-if="selectedUpload?.is_multi_plate">
+                            <div class="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+                                <p class="text-xs text-blue-800">📋 Multi-plate file: <span x-text="selectedUpload.plate_count"></span> plates detected</p>
+                            </div>
+                        </template>
+                        
+                        <!-- Warnings -->
                         <template x-if="selectedUpload?.warnings && selectedUpload.warnings.length > 0">
                             <div class="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
                                 <p class="text-xs text-yellow-800">⚠️ <span x-text="selectedUpload.warnings[0]"></span></p>
                             </div>
                         </template>
+                    </div>
+
+                    <!-- Plate Selection (for multi-plate files) -->
+                    <!-- Only show loading when we're actually waiting for plates (not just empty) -->
+                    <template x-if="selectedUpload?.is_multi_plate && platesLoading && plates.length === 0">
+                        <div class="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                            <p class="text-sm text-blue-700">
+                                <span class="animate-pulse">Loading plate information...</span>
+                            </p>
+                        </div>
+                    </template>
+                    
+                    <!-- Show message for single plate files -->
+                    <template x-if="selectedUpload && !selectedUpload.is_multi_plate && plates.length === 0 && !platesLoading">
+                        <div class="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                            <p class="text-sm text-green-700">Single plate file - ready to slice</p>
+                        </div>
+                    </template>
+                    
+                    <div x-show="selectedUpload?.is_multi_plate && plates.length > 0" 
+                         class="mb-6">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Select Plate to Slice</label>
+                        <div class="space-y-2">
+                            <template x-for="plate in plates" :key="plate.plate_id">
+                                <div class="flex items-center p-3 border rounded-lg cursor-pointer transition"
+                                     :class="selectedPlate === plate.plate_id ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'"
+                                     @click="selectPlate(plate.plate_id)">
+                                    <div class="flex-1">
+                                        <div class="flex items-center">
+                                            <input type="radio" :name="'plate'" :value="plate.plate_id" 
+                                                   :checked="selectedPlate === plate.plate_id"
+                                                   class="h-4 w-4 text-blue-600">
+                                            <span class="ml-2 font-medium text-gray-900">Plate <span x-text="plate.plate_id"></span></span>
+                                            <template x-if="!plate.printable">
+                                                <span class="ml-2 px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded">Non-printable</span>
+                                            </template>
+                                        </div>
+                                        <div class="mt-1 text-sm text-gray-500">
+                                            Object: <span x-text="plate.object_id"></span>
+                                        </div>
+                                        <!-- Plate validation -->
+                                        <template x-if="plate.validation">
+                                            <div class="mt-1">
+                                                <template x-if="plate.validation.fits">
+                                                    <span class="text-xs text-green-600">✓ Fits build volume</span>
+                                                </template>
+                                                <template x-if="!plate.validation.fits">
+                                                    <span class="text-xs text-red-600">⚠️ Exceeds build volume</span>
+                                                    <div class="text-xs text-gray-500" x-text="plate.validation.warnings[0]"></div>
+                                                </template>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
                     </div>
 
                     <!-- Filament Selection -->
@@ -163,10 +228,40 @@
                                 class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
                             <template x-for="filament in filaments" :key="filament.id">
                                 <option :value="filament.id"
-                                        x-text="`${filament.name} - ${filament.material} (${filament.nozzle_temp}°C / ${filament.bed_temp}°C)`">
+                                        x-text="`${filament.name} - ${filament.material} (${filament.nozzle_temp}°C / ${filament.bed_temp}°C) [${filament.bed_type || 'PEI'}]`">
                                 </option>
                             </template>
                         </select>
+                    </div>
+
+                    <!-- Temperature Overrides -->
+                    <div class="mb-6 p-4 bg-gray-50 rounded-lg">
+                        <h3 class="text-sm font-medium text-gray-700 mb-3">Temperature Overrides (Optional)</h3>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs text-gray-500 mb-1">Nozzle Temp (°C)</label>
+                                <input type="number" x-model.number="sliceSettings.nozzle_temp" placeholder="Default"
+                                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-500 mb-1">Bed Temp (°C)</label>
+                                <input type="number" x-model.number="sliceSettings.bed_temp" placeholder="Default"
+                                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            </div>
+                        </div>
+                        <div class="mt-3">
+                            <label class="block text-xs text-gray-500 mb-1">Build Plate Type</label>
+                            <select x-model="sliceSettings.bed_type"
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                                <option :value="null">Use Filament Default</option>
+                                <option value="PEI">PEI</option>
+                                <option value="Glass">Glass</option>
+                                <option value="PC">PC (Polycarbonate)</option>
+                                <option value="FR4">FR4</option>
+                                <option value="CF">Carbon Fiber</option>
+                                <option value="PVA">PVA (Glue)</option>
+                            </select>
+                        </div>
                     </div>
 
                     <!-- Print Settings -->
@@ -399,7 +494,7 @@
                     <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                         <div>
                             <p class="text-sm font-medium text-gray-900" x-text="filament.name"></p>
-                            <p class="text-xs text-gray-500" x-text="`${filament.material} - ${filament.nozzle_temp}°C / ${filament.bed_temp}°C`"></p>
+                            <p class="text-xs text-gray-500" x-text="`${filament.material} - ${filament.nozzle_temp}°C / ${filament.bed_temp}°C - ${filament.bed_type || 'PEI'}`"></p>
                         </div>
                         <span class="text-xs text-gray-500" x-text="filament.print_speed + ' mm/s'"></span>
                     </div>

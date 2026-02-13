@@ -126,7 +126,42 @@ class ApiClient {
                 filament_id: settings.filament_id,
                 layer_height: settings.layer_height,
                 infill_density: settings.infill_density,
-                supports: settings.supports
+                supports: settings.supports,
+                nozzle_temp: settings.nozzle_temp,
+                bed_temp: settings.bed_temp,
+                bed_type: settings.bed_type
+            }),
+        });
+    }
+
+    /**
+     * Get plate information for a multi-plate upload
+     * @param {number} uploadId - The upload ID
+     * @returns {Promise<{is_multi_plate: boolean, plates: Array}>}
+     */
+    async getUploadPlates(uploadId) {
+        return this.fetch(`/uploads/${uploadId}/plates`);
+    }
+
+    /**
+     * Slice a specific plate from a multi-plate upload
+     * @param {number} uploadId - The upload ID
+     * @param {number} plateId - The plate ID to slice
+     * @param {object} settings - Slicing settings
+     * @returns {Promise<{job_id: string, status: string}>}
+     */
+    async slicePlate(uploadId, plateId, settings) {
+        return this.fetch(`/uploads/${uploadId}/slice-plate`, {
+            method: 'POST',
+            body: JSON.stringify({
+                plate_id: plateId,
+                filament_id: settings.filament_id,
+                layer_height: settings.layer_height,
+                infill_density: settings.infill_density,
+                supports: settings.supports,
+                nozzle_temp: settings.nozzle_temp,
+                bed_temp: settings.bed_temp,
+                bed_type: settings.bed_type
             }),
         });
     }

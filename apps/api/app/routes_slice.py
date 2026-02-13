@@ -15,6 +15,8 @@ from db import get_pg_pool
 from config import get_printer_profile
 from slicer import OrcaSlicer, SlicingError
 from profile_embedder import ProfileEmbedder, ProfileEmbedError
+from multi_plate_parser import parse_multi_plate_3mf, extract_plate_objects, get_plate_bounds
+from plate_validator import PlateValidator
 
 
 router = APIRouter(tags=["slicing"])
@@ -26,6 +28,20 @@ class SliceRequest(BaseModel):
     layer_height: Optional[float] = 0.2
     infill_density: Optional[int] = 15
     supports: Optional[bool] = False
+    nozzle_temp: Optional[int] = None
+    bed_temp: Optional[int] = None
+    bed_type: Optional[str] = None
+
+
+class SlicePlateRequest(BaseModel):
+    plate_id: int
+    filament_id: int
+    layer_height: Optional[float] = 0.2
+    infill_density: Optional[int] = 15
+    supports: Optional[bool] = False
+    nozzle_temp: Optional[int] = None
+    bed_temp: Optional[int] = None
+    bed_type: Optional[str] = None
 
 
 def setup_job_logging(job_id: str) -> logging.Logger:
@@ -87,7 +103,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Validate filament exists
         filament = await conn.fetchrow(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type
             FROM filaments
             WHERE id = $1
             """,
@@ -129,12 +145,27 @@ async def slice_upload(upload_id: int, request: SliceRequest):
 
         # Prepare filament settings
         # Orca expects temperatures as arrays of strings, not integers
+        # Use request overrides if provided, otherwise use filament defaults
+        nozzle_temp = request.nozzle_temp if request.nozzle_temp is not None else filament["nozzle_temp"]
+        bed_temp = request.bed_temp if request.bed_temp is not None else filament["bed_temp"]
+
         filament_settings = {
-            "nozzle_temperature": [str(filament["nozzle_temp"])] * 4,  # U1 has 4 extruders
-            "nozzle_temperature_initial_layer": [str(filament["nozzle_temp"])] * 4,
-            "bed_temperature": [str(filament["bed_temp"])] * 4,
-            "bed_temperature_initial_layer": [str(filament["bed_temp"])] * 4,
+            "nozzle_temperature": [str(nozzle_temp)] * 4,  # U1 has 4 extruders
+            "nozzle_temperature_initial_layer": [str(nozzle_temp)] * 4,
+            "bed_temperature": [str(bed_temp)] * 4,
+            "bed_temperature_initial_layer": [str(bed_temp)] * 4,
+            "bed_temperature_initial_layer_single": str(bed_temp),  # Used in printer start gcode
+            # Also set cool_plate_temp - Orca uses this for PEI plates
+            "cool_plate_temp": [str(bed_temp)] * 4,
+            "cool_plate_temp_initial_layer": [str(bed_temp)] * 4,
+            "textured_plate_temp": [str(bed_temp)] * 4,
+            "textured_plate_temp_initial_layer": [str(bed_temp)] * 4,
         }
+
+        # Add bed type if specified in request
+        bed_type = request.bed_type if request.bed_type is not None else filament.get("bed_type", "PEI")
+        if bed_type:
+            filament_settings["default_bed_type"] = bed_type
 
         # Prepare overrides from request
         overrides = {}
@@ -145,6 +176,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         if request.supports:
             overrides["enable_support"] = "1"
             overrides["support_type"] = "normal(auto)"
+
+        job_logger.info(f"Using temps: nozzle={nozzle_temp}°C, bed={bed_temp}°C, bed_type={bed_type}")
 
         try:
             embedder.embed_profiles(
@@ -289,6 +322,383 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 f"Unexpected error: {str(e)}"
             )
         raise HTTPException(status_code=500, detail=f"Slicing failed: {str(e)}")
+
+
+@router.post("/uploads/{upload_id}/slice-plate")
+async def slice_plate(upload_id: int, request: SlicePlateRequest):
+    """Slice a specific plate from a multi-plate 3MF file.
+    
+    This endpoint extracts only the specified plate and slices it,
+    allowing users to choose which plate to print from multi-plate files.
+    
+    Workflow:
+    1. Validate upload exists and is multi-plate
+    2. Validate requested plate exists
+    3. Extract plate-specific geometry
+    4. Create slicing job
+    5. Embed profiles into plate-specific 3MF
+    6. Invoke Orca Slicer
+    7. Parse G-code metadata
+    8. Validate bounds
+    9. Save G-code to /data/slices/
+    10. Update database
+    """
+    pool = get_pg_pool()
+    job_id = f"slice_plate_{uuid.uuid4().hex[:12]}"
+    job_logger = setup_job_logging(job_id)
+
+    job_logger.info(f"Starting plate slicing job for upload {upload_id}, plate {request.plate_id}")
+    job_logger.info(f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
+                    f"infill_density={request.infill_density}, supports={request.supports}")
+
+    async with pool.acquire() as conn:
+        # Validate upload exists
+        upload = await conn.fetchrow(
+            """
+            SELECT id, filename, file_path, bounds_warning
+            FROM uploads
+            WHERE id = $1
+            """,
+            upload_id
+        )
+
+        if not upload:
+            job_logger.error(f"Upload {upload_id} not found")
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+        # Check if this is a multi-plate file
+        source_3mf = Path(upload["file_path"])
+        if not source_3mf.exists():
+            job_logger.error(f"Source 3MF file not found: {source_3mf}")
+            raise HTTPException(status_code=500, detail="Source 3MF file not found")
+
+        plates, is_multi_plate = parse_multi_plate_3mf(source_3mf)
+        if not is_multi_plate:
+            job_logger.error(f"Upload {upload_id} is not a multi-plate file")
+            raise HTTPException(status_code=400, detail="Not a multi-plate file - use /uploads/{id}/slice instead")
+
+        # Validate requested plate exists
+        target_plate = None
+        for plate in plates:
+            if plate.plate_id == request.plate_id:
+                target_plate = plate
+                break
+
+        if not target_plate:
+            job_logger.error(f"Plate {request.plate_id} not found in file")
+            raise HTTPException(status_code=404, detail=f"Plate {request.plate_id} not found")
+
+        if not target_plate.printable:
+            job_logger.warning(f"Plate {request.plate_id} is marked as non-printable")
+
+        job_logger.info(f"Found plate {request.plate_id}: Object {target_plate.object_id}")
+
+        # Validate filament exists
+        filament = await conn.fetchrow(
+            """
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type
+            FROM filaments
+            WHERE id = $1
+            """,
+            request.filament_id
+        )
+
+        if not filament:
+            job_logger.error(f"Filament {request.filament_id} not found")
+            raise HTTPException(status_code=404, detail="Filament not found")
+
+        job_logger.info(f"Using filament: {filament['name']} ({filament['material']})")
+
+        # Validate plate bounds
+        printer_profile = get_printer_profile("snapmaker_u1")
+        validator = PlateValidator(printer_profile)
+        plate_validation = validator.validate_3mf_bounds(source_3mf, request.plate_id)
+
+        if not plate_validation['fits']:
+            job_logger.warning(f"Plate {request.plate_id} exceeds build volume: {'; '.join(plate_validation['warnings'])}")
+            # Don't fail on bounds warning, just log it
+
+        # Create slicing job record
+        await conn.execute(
+            """
+            INSERT INTO slicing_jobs (job_id, upload_id, status, started_at, log_path)
+            VALUES ($1, $2, 'processing', $3, $4)
+            """,
+            job_id, upload_id, datetime.utcnow(), f"/data/logs/slice_{job_id}.log"
+        )
+
+    # Execute plate-specific slicing workflow
+    try:
+        # Create workspace directory
+        workspace = Path(f"/cache/slicing/{job_id}")
+        workspace.mkdir(parents=True, exist_ok=True)
+        job_logger.info(f"Created workspace: {workspace}")
+
+        # Extract the selected plate to a new 3MF file
+        from multi_plate_parser import extract_plate_to_3mf
+        
+        plate_3mf = workspace / "plate_extracted.3mf"
+        job_logger.info(f"Extracting plate {request.plate_id} from 3MF...")
+        extract_plate_to_3mf(source_3mf, request.plate_id, plate_3mf)
+        
+        embedded_3mf = workspace / "sliceable.3mf"
+
+        # Embed profiles into extracted plate 3MF
+        job_logger.info("Embedding Orca profiles into 3MF...")
+        embedder = ProfileEmbedder(Path("/app/orca_profiles"))
+
+        # Prepare filament settings
+        # Use request overrides if provided, otherwise use filament defaults
+        nozzle_temp = request.nozzle_temp if request.nozzle_temp is not None else filament["nozzle_temp"]
+        bed_temp = request.bed_temp if request.bed_temp is not None else filament["bed_temp"]
+
+        filament_settings = {
+            "nozzle_temperature": [str(nozzle_temp)] * 4,
+            "nozzle_temperature_initial_layer": [str(nozzle_temp)] * 4,
+            "bed_temperature": [str(bed_temp)] * 4,
+            "bed_temperature_initial_layer": [str(bed_temp)] * 4,
+            "bed_temperature_initial_layer_single": str(bed_temp),  # Used in printer start gcode
+            # Also set cool_plate_temp - Orca uses this for PEI plates
+            "cool_plate_temp": [str(bed_temp)] * 4,
+            "cool_plate_temp_initial_layer": [str(bed_temp)] * 4,
+            "textured_plate_temp": [str(bed_temp)] * 4,
+            "textured_plate_temp_initial_layer": [str(bed_temp)] * 4,
+        }
+
+        # Add bed type if specified in request
+        bed_type = request.bed_type if request.bed_type is not None else filament.get("bed_type", "PEI")
+        if bed_type:
+            filament_settings["default_bed_type"] = bed_type
+
+        # Prepare overrides from request
+        overrides = {}
+        if request.layer_height != 0.2:
+            overrides["layer_height"] = str(request.layer_height)
+        if request.infill_density != 15:
+            overrides["sparse_infill_density"] = f"{request.infill_density}%"
+        if request.supports:
+            overrides["enable_support"] = "1"
+            overrides["support_type"] = "normal(auto)"
+
+        job_logger.info(f"Using temps: nozzle={nozzle_temp}°C, bed={bed_temp}°C, bed_type={bed_type}")
+
+        try:
+            embedder.embed_profiles(
+                source_3mf=plate_3mf,
+                output_3mf=embedded_3mf,
+                filament_settings=filament_settings,
+                overrides=overrides
+            )
+            three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
+            job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
+        except ProfileEmbedError as e:
+            job_logger.error(f"Failed to embed profiles: {str(e)}")
+            raise SlicingError(f"Profile embedding failed: {str(e)}")
+
+        # Slice with Orca
+        job_logger.info("Invoking Orca Slicer...")
+        slicer = OrcaSlicer(printer_profile)
+
+        result = slicer.slice_3mf(embedded_3mf, workspace)
+
+        if not result["success"]:
+            job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
+            job_logger.error(f"stdout: {result['stdout']}")
+            job_logger.error(f"stderr: {result['stderr']}")
+            raise SlicingError(f"Orca Slicer failed: {result['stderr'][:200]}")
+
+        job_logger.info("Slicing completed successfully")
+        job_logger.info(f"Orca stdout: {result['stdout'][:500]}")
+
+        # Find generated G-code file
+        gcode_files = list(workspace.glob("plate_*.gcode"))
+        if not gcode_files:
+            job_logger.error("No G-code files generated")
+            raise SlicingError("G-code file not generated by Orca")
+
+        gcode_workspace_path = gcode_files[0]
+        job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
+
+        # Parse G-code metadata
+        job_logger.info("Parsing G-code metadata...")
+        metadata = slicer.parse_gcode_metadata(gcode_workspace_path)
+        job_logger.info(f"Metadata: time={metadata['estimated_time_seconds']}s, "
+                       f"filament={metadata['filament_used_mm']}mm, "
+                       f"layers={metadata.get('layer_count', 'N/A')}")
+
+        # Validate bounds
+        job_logger.info("Validating bounds against printer build volume...")
+        try:
+            slicer.validate_bounds(gcode_workspace_path)
+            job_logger.info("Bounds validation passed")
+        except Exception as e:
+            job_logger.warning(f"Bounds validation warning: {str(e)}")
+
+        # Move G-code to final location
+        slices_dir = Path("/data/slices")
+        slices_dir.mkdir(parents=True, exist_ok=True)
+        final_gcode_path = slices_dir / f"{job_id}.gcode"
+
+        shutil.copy(gcode_workspace_path, final_gcode_path)
+        gcode_size = final_gcode_path.stat().st_size
+        gcode_size_mb = gcode_size / 1024 / 1024
+        job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
+
+        # Update database with results
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE slicing_jobs SET
+                    status = 'completed',
+                    completed_at = $2,
+                    gcode_path = $3,
+                    gcode_size = $4,
+                    estimated_time_seconds = $5,
+                    filament_used_mm = $6,
+                    layer_count = $7,
+                    three_mf_path = $8
+                WHERE job_id = $1
+                """,
+                job_id,
+                datetime.utcnow(),
+                str(final_gcode_path),
+                gcode_size,
+                metadata['estimated_time_seconds'],
+                metadata['filament_used_mm'],
+                metadata.get('layer_count'),
+                str(embedded_3mf)
+            )
+
+        job_logger.info(f"Plate slicing job {job_id} completed successfully")
+
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "plate_id": request.plate_id,
+            "gcode_path": str(final_gcode_path),
+            "gcode_size": gcode_size,
+            "gcode_size_mb": round(gcode_size_mb, 2),
+            "plate_validation": plate_validation,
+            "metadata": {
+                "estimated_time_seconds": metadata['estimated_time_seconds'],
+                "filament_used_mm": metadata['filament_used_mm'],
+                "layer_count": metadata.get('layer_count'),
+                "bounds": metadata['bounds']
+            }
+        }
+
+    except SlicingError as e:
+        job_logger.error(f"Plate slicing failed: {str(e)}")
+        # Update job status to failed
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE slicing_jobs SET
+                    status = 'failed',
+                    completed_at = $2,
+                    error_message = $3
+                WHERE job_id = $1
+                """,
+                job_id,
+                datetime.utcnow(),
+                str(e)
+            )
+        raise HTTPException(status_code=500, detail=f"Plate slicing failed: {str(e)}")
+
+    except Exception as e:
+        job_logger.error(f"Unexpected error: {str(e)}")
+        # Update job status to failed
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE slicing_jobs SET
+                    status = 'failed',
+                    completed_at = $2,
+                    error_message = $3
+                WHERE job_id = $1
+                """,
+                job_id,
+                datetime.utcnow(),
+                f"Unexpected error: {str(e)}"
+            )
+        raise HTTPException(status_code=500, detail=f"Plate slicing failed: {str(e)}")
+
+
+@router.get("/uploads/{upload_id}/plates")
+async def get_upload_plates(upload_id: int):
+    """Get plate information for a multi-plate 3MF upload."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        # Validate upload exists
+        upload = await conn.fetchrow(
+            """
+            SELECT id, filename, file_path
+            FROM uploads
+            WHERE id = $1
+            """,
+            upload_id
+        )
+
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+    # Check if this is a multi-plate file
+    source_3mf = Path(upload["file_path"])
+    if not source_3mf.exists():
+        raise HTTPException(status_code=500, detail="Source 3MF file not found")
+
+    try:
+        plates, is_multi_plate = parse_multi_plate_3mf(source_3mf)
+        
+        if not is_multi_plate:
+            return {
+                "upload_id": upload_id,
+                "filename": upload["filename"],
+                "is_multi_plate": False,
+                "plates": []
+            }
+
+        # Get validation info for each plate
+        printer_profile = get_printer_profile("snapmaker_u1")
+        validator = PlateValidator(printer_profile)
+        
+        plate_info = []
+        for plate in plates:
+            try:
+                validation = validator.validate_3mf_bounds(source_3mf, plate.plate_id)
+                
+                plate_dict = plate.to_dict()
+                plate_dict.update({
+                    "validation": {
+                        "fits": validation['fits'],
+                        "warnings": validation['warnings'],
+                        "bounds": validation['bounds']
+                    }
+                })
+                plate_info.append(plate_dict)
+                
+            except Exception as e:
+                logger.error(f"Failed to validate plate {plate.plate_id}: {str(e)}")
+                plate_dict = plate.to_dict()
+                plate_dict.update({
+                    "validation": {
+                        "fits": False,
+                        "warnings": [f"Validation failed: {str(e)}"],
+                        "bounds": None
+                    }
+                })
+                plate_info.append(plate_dict)
+
+        return {
+            "upload_id": upload_id,
+            "filename": upload["filename"],
+            "is_multi_plate": True,
+            "plate_count": len(plates),
+            "plates": plate_info
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse plates: {str(e)}")
 
 
 @router.get("/jobs/{job_id}")

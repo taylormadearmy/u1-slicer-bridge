@@ -36,9 +36,13 @@ CREATE TABLE IF NOT EXISTS filaments (
     nozzle_temp INTEGER NOT NULL,
     bed_temp INTEGER NOT NULL,
     print_speed INTEGER,
+    bed_type TEXT DEFAULT 'PEI',
     is_default BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Add bed_type column if it doesn't exist (for existing databases)
+ALTER TABLE filaments ADD COLUMN IF NOT EXISTS bed_type TEXT DEFAULT 'PEI';
 
 -- ============================================================================
 -- OLD TABLES (removed - plate-based workflow)
