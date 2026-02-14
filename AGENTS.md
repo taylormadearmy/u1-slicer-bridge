@@ -48,14 +48,14 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ✅ M15 multicolour viewer - Show color legend in 2D viewer with all detected/assigned colors  
 ✅ M16 flexible filament assignment - Allow overriding color per extruder (separate material type from color)
 ❌ M17 prime tower options - Add configurable prime tower options for multicolour prints
-❌ M18 multi-plate visual selection - Show plate names and preview images when selecting plates
+✅ M18 multi-plate visual selection - Show plate names and preview images when selecting plates
 
 ### Preview & UX
 ✅ M7 preview - Interactive 2D layer viewer  
 ❌ M12 3D G-code viewer - Interactive 3D preview of sliced G-code  
 ❌ M20 G-code viewer zoom - Add zooming in/out controls for preview
-❌ M21 upload/configure loading UX - Add progress indicator while upload is being prepared for filament/configuration selection
-❌ M22 navigation consistency - Standardize actions like "Back" and "Slice Another" across the UI
+✅ M21 upload/configure loading UX - Add progress indicator while upload is being prepared for filament/configuration selection
+✅ M22 navigation consistency - Standardize actions like "Back" and "Slice Another" across the UI
 
 ### Slicing Controls & Profiles
 ✅ M7.2 build plate type & temperature overrides - Set bed type per filament and override temps at slice time  
@@ -67,7 +67,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 
-**Current:** 13.7 / 24 complete (57%)
+**Current:** 16.7 / 24 complete (70%)
 
 ---
 
@@ -416,6 +416,46 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Root Cause**: Upload response used combined-scene validation warnings without per-plate suppression.
 - **Fix**: `routes_upload.py` now performs per-plate checks during upload and suppresses combined "exceeds" warnings when any plate fits.
 - **Result**: Fresh upload behavior now matches re-validation behavior from `GET /upload/{id}`.
+
+**Implemented: Multi-Plate Visual Selection (M18)**
+- **What changed**:
+  1. Plate metadata now includes `plate_name` (resource object name fallback: `Plate N`).
+  2. Added `GET /uploads/{id}/plates/{plate_id}/preview` to serve embedded plate preview images when present.
+  3. Plate selection UI now renders plate cards with name + preview image (or `No preview` fallback).
+- **Files**: `multi_plate_parser.py`, `routes_slice.py`, `index.html`
+- **Result**: Selecting plates is more visual and informative, especially for large multi-plate projects.
+
+**Implemented: Upload/Configure Loading UX (M21)**
+- **Problem**: After upload bytes finished, users saw no indication while server parsing/validation was still running.
+- **Fix**: Added upload phase states (`uploading` → `processing`) and an explicit "Preparing file" indicator in Step 1.
+- **Files**: `api.js`, `app.js`, `index.html`
+- **Result**: Users now see continuous progress from transfer through server-side preparation.
+
+**Implemented: Navigation Consistency (M22)**
+- **Fix**: Standardized secondary navigation labels to `Back to Upload` (configure) and `Start New Slice` (complete).
+- **Files**: `index.html`
+- **Result**: Navigation language is now consistent across the workflow.
+
+**Fixed: Fresh Upload Plate Preview Gap**
+- **Problem**: Plate previews could be missing right after a fresh upload, while the same file showed previews when selected later from Recent Uploads.
+- **Root Cause**: Fresh-upload flow used plate data from upload response, which did not include preview URLs from the plates endpoint.
+- **Fix**: Frontend now always reloads plate metadata via `GET /uploads/{id}/plates` after upload completes.
+- **Result**: Fresh and historical upload paths now show the same plate preview behavior.
+
+**Implemented: Embedded Upload Preview Endpoints and List Thumbnails**
+- **What changed**:
+  1. Added `GET /uploads/{id}/preview` to serve the best embedded 3MF preview image (Explorer-style thumbnail when present).
+  2. Enhanced preview detection to include common embedded names (`thumbnail`, `preview`, `cover`, `plate`, `top`, `pick`).
+  3. Upload and sliced-file lists now render thumbnail previews using upload-based preview URLs.
+- **Files**: `routes_slice.py`, `index.html`
+- **Result**: Users see consistent visual previews in Recent Uploads and Sliced Files.
+
+**Improved: Single-Plate Preview + Plate Loading UX**
+- **Fix**:
+  1. Configure step now shows single-plate preview when available.
+  2. Plate loading state now uses progress-style treatment (`Loading plate information and preview...`) to match upload UX.
+- **Files**: `app.js`, `index.html`
+- **Result**: Single-plate workflow feels consistent and clearer during wait states.
 
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.

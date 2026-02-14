@@ -60,8 +60,13 @@ class ApiClient {
                 xhr.upload.addEventListener('progress', (e) => {
                     if (e.lengthComputable) {
                         const progress = Math.round((e.loaded / e.total) * 100);
-                        onProgress(progress);
+                        onProgress({ phase: 'uploading', progress });
                     }
+                });
+
+                // Upload bytes are fully transferred; server may still be parsing/validating.
+                xhr.upload.addEventListener('load', () => {
+                    onProgress({ phase: 'processing', progress: 100 });
                 });
             }
 

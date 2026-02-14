@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 class PlateInfo:
     """Represents a single plate in a multi-plate 3MF file."""
     
-    def __init__(self, plate_id: int, object_id: str, transform: List[float], 
-                 printable: bool = True):
+    def __init__(self, plate_id: int, object_id: str, transform: List[float],
+                 printable: bool = True, plate_name: Optional[str] = None):
         self.plate_id = plate_id
         self.object_id = object_id
         self.transform = transform  # 4x4 transform matrix (16 elements)
         self.printable = printable
+        self.plate_name = plate_name or f"Plate {plate_id}"
         
     def get_translation(self) -> Tuple[float, float, float]:
         """Extract translation from transform matrix."""
@@ -38,6 +39,7 @@ class PlateInfo:
         return {
             "plate_id": self.plate_id,
             "object_id": self.object_id,
+            "plate_name": self.plate_name,
             "printable": self.printable,
             "translation": [tx, ty, tz],
             "transform": self.transform
@@ -70,6 +72,16 @@ def parse_multi_plate_3mf(file_path: Path) -> Tuple[List[PlateInfo], bool]:
                 "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
             }
             
+            # Build object ID -> name map from resources (if available)
+            object_names: Dict[str, str] = {}
+            resources = root.find("m:resources", ns)
+            if resources is not None:
+                for obj in resources.findall("m:object", ns):
+                    obj_id = obj.get("id")
+                    obj_name = (obj.get("name") or "").strip()
+                    if obj_id and obj_name:
+                        object_names[obj_id] = obj_name
+
             # Find build section which contains plate items
             build = root.find("m:build", ns)
             if build is None:
@@ -86,7 +98,8 @@ def parse_multi_plate_3mf(file_path: Path) -> Tuple[List[PlateInfo], bool]:
             
             # Parse each item as a plate
             for i, item in enumerate(items):
-                object_id = item.get("objectid")
+                object_id_attr = item.get("objectid")
+                object_id = object_id_attr if object_id_attr is not None else str(i + 1)
                 printable_str = item.get("printable", "1")
                 printable = printable_str != "0"
                 
@@ -99,16 +112,17 @@ def parse_multi_plate_3mf(file_path: Path) -> Tuple[List[PlateInfo], bool]:
                     # 3x4 matrix in row-major: [m00,m01,m02,m03, m10,m11,m12,m13, m20,m21,m22,m23]
                     # e.g., [1,0,0,135, 0,1,0,135, 0,0,1,10]
                     # This should become a 4x4 with identity bottom row
-                    transform_values = transform_values + [0, 0, 0, 1]
+                    transform_values = transform_values + [0.0, 0.0, 0.0, 1.0]
                 elif len(transform_values) != 16:
                     logger.warning(f"Invalid transform matrix for plate {i+1} (got {len(transform_values)} values), using identity")
-                    transform_values = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+                    transform_values = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0]
                 
                 plate = PlateInfo(
                     plate_id=i + 1,  # 1-based plate numbering
                     object_id=object_id,
                     transform=transform_values,
-                    printable=printable
+                    printable=printable,
+                    plate_name=object_names.get(object_id, f"Plate {i + 1}")
                 )
                 plates.append(plate)
                 
@@ -295,11 +309,11 @@ def get_plate_bounds(file_path: Path, plate_id: Optional[int] = None) -> Dict[st
                     target_plate = p
                     break
             
+            if target_plate is None:
+                raise ValueError(f"Plate {plate_id} not found")
+
             # Extract the specific object for this plate
             plate_mesh = _extract_plate_mesh(file_path, target_plate)
-                    
-            if not target_plate:
-                raise ValueError(f"Plate {plate_id} not found")
             
             if plate_mesh is None:
                 # Fallback to translation-based estimation

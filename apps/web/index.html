@@ -103,15 +103,21 @@
                         accept=".3mf"
                         class="hidden">
 
-                    <!-- Upload Progress -->
-                    <div x-show="uploadProgress > 0 && uploadProgress < 100" class="mt-4" x-cloak>
+                    <!-- Upload + Processing Progress -->
+                    <div x-show="uploadPhase !== 'idle'" class="mt-4" x-cloak>
                         <div class="flex justify-between text-sm mb-1">
-                            <span class="text-gray-600">Uploading...</span>
-                            <span class="text-gray-600" x-text="`${uploadProgress}%`"></span>
+                            <span class="text-gray-600" x-text="uploadPhase === 'processing' ? 'Preparing file (parsing and validation)...' : 'Uploading...' "></span>
+                            <span class="text-gray-600" x-text="uploadPhase === 'processing' ? 'Processing' : `${uploadProgress}%`"></span>
                         </div>
-                        <div class="w-full bg-gray-200 rounded-full h-2">
-                            <div class="bg-blue-500 h-2 rounded-full transition-all" :style="`width: ${uploadProgress}%`"></div>
+                        <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                            <template x-if="uploadPhase !== 'processing'">
+                                <div class="bg-blue-500 h-2 rounded-full transition-all" :style="`width: ${uploadProgress}%`"></div>
+                            </template>
+                            <template x-if="uploadPhase === 'processing'">
+                                <div class="h-2 w-1/3 bg-blue-500 rounded-full animate-pulse"></div>
+                            </template>
                         </div>
+                        <p class="text-xs text-gray-500 mt-2" x-show="uploadPhase === 'processing'">Large or multi-plate files can take around 30s to become ready.</p>
                     </div>
 
                     <!-- Recent Uploads -->
@@ -131,6 +137,10 @@
                                 <div @click="selectUpload(upload)" class="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 cursor-pointer transition">
                                     <div class="flex items-center gap-3 flex-1">
                                         <input type="checkbox" :checked="isSelected('upload', upload.upload_id)" @click.stop="toggleSelect('upload', upload.upload_id, idx, $event)" class="w-4 h-4 text-blue-600 rounded">
+                                        <div x-data="{ imgLoaded: false, imgFailed: false }" class="w-16 h-12 rounded border border-gray-200 bg-gray-100 overflow-hidden relative shrink-0">
+                                            <div x-show="!imgLoaded || imgFailed" class="absolute inset-0 flex items-center justify-center text-[10px] text-gray-500">No preview</div>
+                                            <img :src="`/api/uploads/${upload.upload_id}/preview`" alt="Upload preview" x-show="!imgFailed" class="w-full h-full object-cover relative z-10" loading="lazy" @load="imgLoaded = true" @error="imgFailed = true">
+                                        </div>
                                         <div class="flex-1">
                                             <p class="font-medium text-gray-900" x-text="upload.filename"></p>
                                             <p class="text-sm text-gray-500" x-text="`${(upload.file_size / 1024 / 1024).toFixed(2)} MB`"></p>
@@ -166,6 +176,10 @@
                                 <div class="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 transition">
                                     <div class="flex items-center gap-3 flex-1">
                                         <input type="checkbox" :checked="isSelected('job', job.job_id)" @click.stop="toggleSelect('job', job.job_id, idx, $event)" class="w-4 h-4 text-blue-600 rounded">
+                                        <div x-data="{ imgLoaded: false, imgFailed: false }" class="w-16 h-12 rounded border border-gray-200 bg-gray-100 overflow-hidden relative shrink-0">
+                                            <div x-show="!imgLoaded || imgFailed" class="absolute inset-0 flex items-center justify-center text-[10px] text-gray-500">No preview</div>
+                                            <img :src="`/api/uploads/${job.upload_id}/preview`" alt="Sliced file preview" x-show="!imgFailed" class="w-full h-full object-cover relative z-10" loading="lazy" @load="imgLoaded = true" @error="imgFailed = true">
+                                        </div>
                                         <div class="flex-1">
                                             <p class="font-medium text-gray-900" x-text="job.filename"></p>
                                             <div class="flex gap-4 mt-1 text-sm text-gray-500">
@@ -224,18 +238,29 @@
 
                     <!-- Plate Selection (for multi-plate files) -->
                     <!-- Only show loading when we're actually waiting for plates (not just empty) -->
-                    <template x-if="selectedUpload?.is_multi_plate && platesLoading && plates.length === 0">
+                    <template x-if="platesLoading && plates.length === 0">
                         <div class="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                            <p class="text-sm text-blue-700">
-                                <span class="animate-pulse">Loading plate information...</span>
-                            </p>
+                            <div class="flex justify-between text-sm mb-1">
+                                <span class="text-blue-700">Loading plate information and preview...</span>
+                                <span class="text-blue-700">Processing</span>
+                            </div>
+                            <div class="w-full bg-blue-100 rounded-full h-2 overflow-hidden">
+                                <div class="h-2 w-1/3 bg-blue-500 rounded-full animate-pulse"></div>
+                            </div>
+                            <p class="text-xs text-blue-700 mt-2">Large multi-plate files can take around 30s.</p>
                         </div>
                     </template>
                     
                     <!-- Show message for single plate files -->
                     <template x-if="selectedUpload && !selectedUpload.is_multi_plate && plates.length === 0 && !platesLoading">
                         <div class="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                            <p class="text-sm text-green-700">Single plate file - ready to slice</p>
+                            <div class="flex items-center gap-3">
+                                <div x-data="{ imgLoaded: false, imgFailed: false }" class="w-24 h-16 rounded border border-green-200 bg-white overflow-hidden relative shrink-0">
+                                    <div x-show="!imgLoaded || imgFailed" class="absolute inset-0 flex items-center justify-center text-[10px] text-gray-500">No preview</div>
+                                    <img :src="`/api/uploads/${selectedUpload.upload_id}/preview`" alt="Single plate preview" x-show="!imgFailed" class="w-full h-full object-cover relative z-10" loading="lazy" @load="imgLoaded = true" @error="imgFailed = true">
+                                </div>
+                                <p class="text-sm text-green-700">Single plate file - ready to slice</p>
+                            </div>
                         </div>
                     </template>
                     
@@ -244,21 +269,29 @@
                         <label class="block text-sm font-medium text-gray-700 mb-2">Select Plate to Slice</label>
                         <div class="space-y-2">
                             <template x-for="plate in plates" :key="plate.plate_id">
-                                <div class="flex items-center p-3 border rounded-lg cursor-pointer transition"
+                                <div class="flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition"
                                      :class="selectedPlate === plate.plate_id ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'"
                                      @click="selectPlate(plate.plate_id)">
+                                    <div class="w-24 h-16 rounded border border-gray-200 bg-gray-100 overflow-hidden flex items-center justify-center shrink-0">
+                                        <template x-if="plate.preview_url">
+                                            <img :src="plate.preview_url" :alt="plate.plate_name || `Plate ${plate.plate_id}`" class="w-full h-full object-cover" loading="lazy">
+                                        </template>
+                                        <template x-if="!plate.preview_url">
+                                            <span class="text-[10px] text-gray-500 px-2 text-center">No preview</span>
+                                        </template>
+                                    </div>
                                     <div class="flex-1">
                                         <div class="flex items-center">
                                             <input type="radio" :name="'plate'" :value="plate.plate_id" 
                                                    :checked="selectedPlate === plate.plate_id"
                                                    class="h-4 w-4 text-blue-600">
-                                            <span class="ml-2 font-medium text-gray-900">Plate <span x-text="plate.plate_id"></span></span>
+                                            <span class="ml-2 font-medium text-gray-900" x-text="plate.plate_name || `Plate ${plate.plate_id}`"></span>
                                             <template x-if="!plate.printable">
                                                 <span class="ml-2 px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded">Non-printable</span>
                                             </template>
                                         </div>
                                         <div class="mt-1 text-sm text-gray-500">
-                                            Object: <span x-text="plate.object_id"></span>
+                                            Plate ID <span x-text="plate.plate_id"></span> • Object <span x-text="plate.object_id"></span>
                                         </div>
                                         <!-- Plate validation -->
                                         <template x-if="plate.validation">
@@ -431,7 +464,7 @@
                     <div class="mt-8 flex gap-4">
                         <button @click="currentStep = 'upload'"
                                 class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
-                            ← Back
+                            Back to Upload
                         </button>
                         <button @click="startSlice()"
                                 :disabled="!selectedFilament && (!selectedFilaments || selectedFilaments.length === 0)"
@@ -516,7 +549,7 @@
                         </a>
                         <button @click="resetWorkflow()"
                                 class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
-                            Slice Another
+                            Start New Slice
                         </button>
                     </div>
                 </section>

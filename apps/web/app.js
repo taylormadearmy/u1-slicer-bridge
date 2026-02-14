@@ -8,6 +8,7 @@ function app() {
         // UI State
         dragOver: false,
         uploadProgress: 0,
+        uploadPhase: 'idle', // 'idle' | 'uploading' | 'processing'
         error: null,
 
         // Current workflow step: 'upload' | 'configure' | 'slicing' | 'complete'
@@ -278,12 +279,26 @@ function app() {
             console.log(`Uploading: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
             this.currentStep = 'upload';
             this.uploadProgress = 0;
+            this.uploadPhase = 'uploading';
 
             try {
                 console.log('🔄 Starting upload...');
-                const result = await api.uploadFile(file, (progress) => {
-                    this.uploadProgress = progress;
-                    console.log(`📤 Upload progress: ${progress}%`);
+                const result = await api.uploadFile(file, (status) => {
+                    if (typeof status === 'number') {
+                        this.uploadPhase = 'uploading';
+                        this.uploadProgress = status;
+                        console.log(`📤 Upload progress: ${status}%`);
+                        return;
+                    }
+
+                    this.uploadPhase = status?.phase || 'uploading';
+                    this.uploadProgress = typeof status?.progress === 'number' ? status.progress : this.uploadProgress;
+
+                    if (this.uploadPhase === 'processing') {
+                        console.log('🧠 Upload complete, processing 3MF...');
+                    } else {
+                        console.log(`📤 Upload progress: ${this.uploadProgress}%`);
+                    }
                 });
 
                 console.log('✅ Upload complete:', result);
@@ -292,6 +307,7 @@ function app() {
                 console.log('   - plate_count:', result.plate_count);
                 
                 this.uploadProgress = 0;
+                this.uploadPhase = 'idle';
 
                 // Add to uploads list
                 this.uploads.unshift(result);
@@ -307,40 +323,32 @@ function app() {
                 this.filamentOverride = false;
                 this.applyDetectedColors(result.detected_colors || []);
                 
-                // Check if upload response already has multi-plate data (it does from the API!)
-                if (result.is_multi_plate && result.plates && result.plates.length > 0) {
-                    this.plates = result.plates;
-                    this.selectedUpload.is_multi_plate = true;
-                    this.selectedUpload.plate_count = result.plate_count;
-                    console.log(`✅ Using ${this.plates.length} plates from upload response`);
-                } else {
-                    // Not in upload response - try loading separately
-                    console.log('📋 Multi-plate data not in upload response, loading separately...');
-                    this.platesLoading = true;
-                    this.plates = [];
-                    try {
-                        const platesData = await api.getUploadPlates(result.upload_id);
-                        this.platesLoading = false;
-                        
-                        if (platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
-                            this.selectedUpload.is_multi_plate = true;
-                            this.selectedUpload.plate_count = platesData.plate_count;
-                            this.plates = platesData.plates;
-                            console.log(`✅ Loaded ${this.plates.length} plates for new upload`);
-                        } else {
-                            this.selectedUpload.is_multi_plate = false;
-                            this.plates = [];
-                            console.log('Single plate file');
-                        }
-                    } catch (err) {
-                        this.platesLoading = false;
+                // Always reload plate info so we get latest validation + preview URLs.
+                this.platesLoading = true;
+                this.plates = [];
+                try {
+                    const platesData = await api.getUploadPlates(result.upload_id);
+                    this.platesLoading = false;
+
+                    if (platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
+                        this.selectedUpload.is_multi_plate = true;
+                        this.selectedUpload.plate_count = platesData.plate_count;
+                        this.plates = platesData.plates;
+                        console.log(`✅ Loaded ${this.plates.length} plates for new upload`);
+                    } else {
                         this.selectedUpload.is_multi_plate = false;
                         this.plates = [];
-                        console.warn('Could not load plates for new upload:', err);
+                        console.log('Single plate file');
                     }
+                } catch (err) {
+                    this.platesLoading = false;
+                    this.selectedUpload.is_multi_plate = false;
+                    this.plates = [];
+                    console.warn('Could not load plates for new upload:', err);
                 }
             } catch (err) {
                 this.uploadProgress = 0;
+                this.uploadPhase = 'idle';
                 this.showError(`Upload failed: ${err.message}`);
                 console.error(err);
             }
@@ -603,6 +611,8 @@ function app() {
             this.selectedUpload = null;
             this.sliceResult = null;
             this.sliceProgress = 0;
+            this.uploadProgress = 0;
+            this.uploadPhase = 'idle';
 
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);

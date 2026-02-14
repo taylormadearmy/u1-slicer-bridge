@@ -5,10 +5,12 @@ import logging
 import shutil
 import re
 import json
+import zipfile
+import mimetypes
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
@@ -23,6 +25,81 @@ from parser_3mf import detect_colors_from_3mf, detect_active_extruders_from_3mf
 
 router = APIRouter(tags=["slicing"])
 logger = logging.getLogger(__name__)
+
+
+def _index_preview_assets(source_3mf: Path) -> Dict[str, object]:
+    """Index embedded preview images from a 3MF archive.
+
+    Returns:
+      {
+        "by_plate": {plate_id: internal_zip_path},
+        "best": internal_zip_path | None,
+      }
+    """
+    preview_map: Dict[int, str] = {}
+    best_preview: Optional[str] = None
+
+    try:
+        with zipfile.ZipFile(source_3mf, "r") as zf:
+            names = zf.namelist()
+            image_names = [
+                n for n in names
+                if n.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                and "/metadata/" in f"/{n.lower()}"
+            ]
+
+            # Plate-specific previews, when naming allows inference.
+            for name in image_names:
+                lower = name.lower()
+                match = re.search(r"(?:plate|top|pick|thumbnail|preview|cover)[_\-]?(\d+)", lower)
+                if not match:
+                    match = re.search(r"[_\-/](\d+)\.(?:png|jpg|jpeg|webp)$", lower)
+                if not match:
+                    continue
+
+                plate_id = int(match.group(1))
+                if plate_id not in preview_map:
+                    preview_map[plate_id] = name
+
+            # Best generic preview (used for uploads list/single-plate fallback).
+            def score(path: str) -> tuple[int, int]:
+                p = path.lower()
+                if "thumbnail" in p:
+                    return (0, len(p))
+                if "preview" in p:
+                    return (1, len(p))
+                if "cover" in p:
+                    return (2, len(p))
+                if "top" in p:
+                    return (3, len(p))
+                if "plate" in p:
+                    return (4, len(p))
+                if "pick" in p:
+                    return (5, len(p))
+                return (9, len(p))
+
+            if image_names:
+                best_preview = sorted(image_names, key=score)[0]
+    except Exception as e:
+        logger.warning(f"Failed to index preview images: {e}")
+
+    return {
+        "by_plate": preview_map,
+        "best": best_preview,
+    }
+
+
+def _index_plate_previews(source_3mf: Path) -> Dict[int, str]:
+    assets = _index_preview_assets(source_3mf)
+    by_plate = assets.get("by_plate")
+    if isinstance(by_plate, dict):
+        return by_plate
+    return {}
+
+
+def _guess_image_media_type(filename: str) -> str:
+    media_type, _ = mimetypes.guess_type(filename)
+    return media_type or "image/png"
 
 
 def get_filament_ids(request) -> List[int]:
@@ -935,6 +1012,10 @@ async def get_upload_plates(upload_id: int):
         # Get validation info for each plate
         printer_profile = get_printer_profile("snapmaker_u1")
         validator = PlateValidator(printer_profile)
+        preview_assets = _index_preview_assets(source_3mf)
+        preview_map_obj = preview_assets.get("by_plate")
+        preview_map: Dict[int, str] = preview_map_obj if isinstance(preview_map_obj, dict) else {}
+        has_generic_preview = isinstance(preview_assets.get("best"), str)
         
         plate_info = []
         for plate in plates:
@@ -943,6 +1024,11 @@ async def get_upload_plates(upload_id: int):
                 
                 plate_dict = plate.to_dict()
                 plate_dict.update({
+                    "preview_url": (
+                        f"/api/uploads/{upload_id}/plates/{plate.plate_id}/preview"
+                        if plate.plate_id in preview_map
+                        else (f"/api/uploads/{upload_id}/preview" if has_generic_preview else None)
+                    ),
                     "validation": {
                         "fits": validation['fits'],
                         "warnings": validation['warnings'],
@@ -955,6 +1041,11 @@ async def get_upload_plates(upload_id: int):
                 logger.error(f"Failed to validate plate {plate.plate_id}: {str(e)}")
                 plate_dict = plate.to_dict()
                 plate_dict.update({
+                    "preview_url": (
+                        f"/api/uploads/{upload_id}/plates/{plate.plate_id}/preview"
+                        if plate.plate_id in preview_map
+                        else (f"/api/uploads/{upload_id}/preview" if has_generic_preview else None)
+                    ),
                     "validation": {
                         "fits": False,
                         "warnings": [f"Validation failed: {str(e)}"],
@@ -973,6 +1064,82 @@ async def get_upload_plates(upload_id: int):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse plates: {str(e)}")
+
+
+@router.get("/uploads/{upload_id}/plates/{plate_id}/preview")
+async def get_upload_plate_preview(upload_id: int, plate_id: int):
+    """Return embedded preview image for a specific plate when available."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            """
+            SELECT id, file_path
+            FROM uploads
+            WHERE id = $1
+            """,
+            upload_id,
+        )
+
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+    source_3mf = Path(upload["file_path"])
+    if not source_3mf.exists():
+        raise HTTPException(status_code=404, detail="Source 3MF file not found")
+
+    assets = _index_preview_assets(source_3mf)
+    by_plate_obj = assets.get("by_plate")
+    preview_map: Dict[int, str] = by_plate_obj if isinstance(by_plate_obj, dict) else {}
+    internal_path = preview_map.get(plate_id)
+    if not internal_path and plate_id == 1:
+        best_preview = assets.get("best")
+        if isinstance(best_preview, str):
+            internal_path = best_preview
+    if not internal_path:
+        raise HTTPException(status_code=404, detail="Plate preview not available")
+
+    try:
+        with zipfile.ZipFile(source_3mf, "r") as zf:
+            image_bytes = zf.read(internal_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read plate preview: {e}")
+
+    return Response(content=image_bytes, media_type=_guess_image_media_type(internal_path))
+
+
+@router.get("/uploads/{upload_id}/preview")
+async def get_upload_preview(upload_id: int):
+    """Return best embedded upload preview image (Explorer-style thumbnail)."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            """
+            SELECT id, file_path
+            FROM uploads
+            WHERE id = $1
+            """,
+            upload_id,
+        )
+
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+    source_3mf = Path(upload["file_path"])
+    if not source_3mf.exists():
+        raise HTTPException(status_code=404, detail="Source 3MF file not found")
+
+    assets = _index_preview_assets(source_3mf)
+    best_preview = assets.get("best")
+    if not isinstance(best_preview, str) or not best_preview:
+        raise HTTPException(status_code=404, detail="Upload preview not available")
+
+    try:
+        with zipfile.ZipFile(source_3mf, "r") as zf:
+            image_bytes = zf.read(best_preview)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read upload preview: {e}")
+
+    return Response(content=image_bytes, media_type=_guess_image_media_type(best_preview))
 
 
 @router.get("/jobs/{job_id}")
