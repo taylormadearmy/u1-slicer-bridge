@@ -39,6 +39,8 @@ function app() {
         sliceSettings: {
             layer_height: 0.2,
             infill_density: 15,
+            wall_count: 3,
+            infill_pattern: 'gyroid',
             supports: false,
             nozzle_temp: null,
             bed_temp: null,

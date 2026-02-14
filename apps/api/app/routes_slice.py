@@ -118,6 +118,8 @@ class SliceRequest(BaseModel):
     filament_colors: Optional[List[str]] = None  # Override colors per extruder (e.g., ["#FF0000", "#00FF00"])
     layer_height: Optional[float] = 0.2
     infill_density: Optional[int] = 15
+    wall_count: Optional[int] = 3
+    infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
@@ -132,6 +134,8 @@ class SlicePlateRequest(BaseModel):
     filament_colors: Optional[List[str]] = None  # Override colors per extruder
     layer_height: Optional[float] = 0.2
     infill_density: Optional[int] = 15
+    wall_count: Optional[int] = 3
+    infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
@@ -173,8 +177,11 @@ async def slice_upload(upload_id: int, request: SliceRequest):
     job_logger = setup_job_logging(job_id)
 
     job_logger.info(f"Starting slicing job for upload {upload_id}")
-    job_logger.info(f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
-                    f"infill_density={request.infill_density}, supports={request.supports}")
+    job_logger.info(
+        f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
+        f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
+        f"infill_pattern={request.infill_pattern}, supports={request.supports}"
+    )
 
     async with pool.acquire() as conn:
         # Validate upload exists
@@ -364,6 +371,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["layer_height"] = str(request.layer_height)
         if request.infill_density != 15:
             overrides["sparse_infill_density"] = f"{request.infill_density}%"
+        if request.wall_count != 3:
+            overrides["wall_loops"] = str(request.wall_count)
+        if request.infill_pattern and request.infill_pattern != "gyroid":
+            overrides["sparse_infill_pattern"] = request.infill_pattern
         if request.supports:
             overrides["enable_support"] = "1"
             overrides["support_type"] = "normal(auto)"
@@ -577,8 +588,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
     job_logger = setup_job_logging(job_id)
 
     job_logger.info(f"Starting plate slicing job for upload {upload_id}, plate {request.plate_id}")
-    job_logger.info(f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
-                    f"infill_density={request.infill_density}, supports={request.supports}")
+    job_logger.info(
+        f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
+        f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
+        f"infill_pattern={request.infill_pattern}, supports={request.supports}"
+    )
 
     async with pool.acquire() as conn:
         # Validate upload exists
@@ -789,6 +803,10 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["layer_height"] = str(request.layer_height)
         if request.infill_density != 15:
             overrides["sparse_infill_density"] = f"{request.infill_density}%"
+        if request.wall_count != 3:
+            overrides["wall_loops"] = str(request.wall_count)
+        if request.infill_pattern and request.infill_pattern != "gyroid":
+            overrides["sparse_infill_pattern"] = request.infill_pattern
         if request.supports:
             overrides["enable_support"] = "1"
             overrides["support_type"] = "normal(auto)"

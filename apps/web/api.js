@@ -128,6 +128,8 @@ class ApiClient {
         const payload = {
             layer_height: settings.layer_height,
             infill_density: settings.infill_density,
+            wall_count: settings.wall_count,
+            infill_pattern: settings.infill_pattern,
             supports: settings.supports,
             nozzle_temp: settings.nozzle_temp,
             bed_temp: settings.bed_temp,
@@ -170,6 +172,8 @@ class ApiClient {
             plate_id: plateId,
             layer_height: settings.layer_height,
             infill_density: settings.infill_density,
+            wall_count: settings.wall_count,
+            infill_pattern: settings.infill_pattern,
             supports: settings.supports,
             nozzle_temp: settings.nozzle_temp,
             bed_temp: settings.bed_temp,

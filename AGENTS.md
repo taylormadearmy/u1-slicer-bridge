@@ -62,12 +62,12 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ❌ M13 custom filament profiles - Upload and use user-provided filament profiles  
 ❌ M24 extruder presets - Preconfigure default slicing settings and filament color/type per extruder
 ❌ M19 slicer selection - Choose between OrcaSlicer and Snapmaker Orca for slicing
-❌ M23 common slicing options - Allow changing wall count, infill pattern, and infill density (%)
+✅ M23 common slicing options - Allow changing wall count, infill pattern, and infill density (%)
 
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 
-**Current:** 16.7 / 24 complete (70%)
+**Current:** 17.7 / 24 complete (74%)
 
 ---
 
@@ -456,6 +456,14 @@ Multi-plate files were being treated as a single giant plate, causing:
   2. Plate loading state now uses progress-style treatment (`Loading plate information and preview...`) to match upload UX.
 - **Files**: `app.js`, `index.html`
 - **Result**: Single-plate workflow feels consistent and clearer during wait states.
+
+**Implemented: Common Slicing Options (M23)**
+- **What changed**:
+  1. Added Configure controls for `wall_count` and `infill_pattern` alongside existing infill density.
+  2. Slice request payloads now include `wall_count` and `infill_pattern` for both full-file and plate-specific slicing.
+  3. Backend applies overrides to Orca project settings (`wall_loops`, `sparse_infill_pattern`, `sparse_infill_density`).
+- **Files**: `index.html`, `app.js`, `api.js`, `routes_slice.py`
+- **Result**: Users can tune core print strength/speed behavior from the UI without editing profiles.
 
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.
