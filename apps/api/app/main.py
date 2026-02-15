@@ -841,12 +841,12 @@ async def init_default_filaments():
     pool = get_pg_pool()
 
     default_filaments = [
-        {"name": "PLA Red", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FF0000", "extruder_index": 0, "is_default": True, "source_type": "starter"},
-        {"name": "PLA Blue", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#0000FF", "extruder_index": 1, "is_default": False, "source_type": "starter"},
-        {"name": "PLA Green", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#00FF00", "extruder_index": 2, "is_default": False, "source_type": "starter"},
-        {"name": "PLA Yellow", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 60, "bed_type": "PEI", "color_hex": "#FFFF00", "extruder_index": 3, "is_default": False, "source_type": "starter"},
-        {"name": "PETG", "material": "PETG", "nozzle_temp": 240, "bed_temp": 80, "print_speed": 50, "bed_type": "PEI", "color_hex": "#FF6600", "extruder_index": 0, "is_default": False, "source_type": "starter"},
-        {"name": "ABS", "material": "ABS", "nozzle_temp": 250, "bed_temp": 100, "print_speed": 50, "bed_type": "Glass", "color_hex": "#333333", "extruder_index": 0, "is_default": False, "source_type": "starter"},
+        {"name": "PLA Red", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#FF0000", "extruder_index": 0, "is_default": True, "source_type": "starter"},
+        {"name": "PLA Blue", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#0000FF", "extruder_index": 1, "is_default": False, "source_type": "starter"},
+        {"name": "PLA Green", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#00FF00", "extruder_index": 2, "is_default": False, "source_type": "starter"},
+        {"name": "PLA Yellow", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#FFFF00", "extruder_index": 3, "is_default": False, "source_type": "starter"},
+        {"name": "PETG", "material": "PETG", "nozzle_temp": 240, "bed_temp": 80, "print_speed": 150, "bed_type": "PEI", "color_hex": "#FF6600", "extruder_index": 0, "is_default": False, "source_type": "starter"},
+        {"name": "ABS", "material": "ABS", "nozzle_temp": 250, "bed_temp": 100, "print_speed": 150, "bed_type": "Glass", "color_hex": "#333333", "extruder_index": 0, "is_default": False, "source_type": "starter"},
         {"name": "TPU", "material": "TPU", "nozzle_temp": 220, "bed_temp": 40, "print_speed": 30, "bed_type": "PEI", "color_hex": "#FF00FF", "extruder_index": 0, "is_default": False, "source_type": "starter"},
     ]
 
