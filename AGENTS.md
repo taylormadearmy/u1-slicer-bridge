@@ -359,6 +359,13 @@ Multi-plate files were being treated as a single giant plate, causing:
   2. `routes_slice.py` (both endpoints): `required_extruders` and `multicolor_slot_count` now use `max(active_extruders, detected_colors)` so painted files auto-expand correctly.
 - **Result**: SpeedBoatRace correctly reports 4 colours. Fiddle Balls correctly reports 1 colour (AMS palette ignored).
 
+**Implemented: Layer-Based Tool Change Detection (MultiAsSingle Dual-Colour)**
+- **Problem**: Bambu files with mid-print filament swaps stored in `custom_gcode_per_layer.xml` (e.g., Fiddle Balls "dual colour" plates) were detected as single-colour.
+- **Fix**:
+  1. `parser_3mf.py`: Added `detect_layer_tool_changes()` to parse tool change entries (type=2) per plate. `detect_colors_from_3mf()` now includes colours from these entries.
+  2. `profile_embedder.py`: Added `_has_layer_tool_changes()`. Files with layer tool changes now use the assignment-preserving embed path (trimesh rebuild would destroy `custom_gcode_per_layer.xml`).
+- **Result**: Fiddle Balls detects 2 colours and slices with real `T0`/`T1` tool changes at the specified layer height.
+
 **Multicolour Crash Handling Update (Clear Failure Mode)**
 - **Problem**: Certain files (e.g., Dragon/Poker variants) can still segfault in Snapmaker Orca v2.2.4 when multicolour slicing is attempted.
 - **Fix**: Slice endpoints now convert multicolour segfaults into a clear, actionable 400 error instead of returning raw crash output.

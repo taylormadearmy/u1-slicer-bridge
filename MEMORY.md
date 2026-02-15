@@ -332,4 +332,20 @@ Then hard refresh browser (Ctrl+Shift+R).
   - `paint_color` attributes on mesh triangles (confirms actual painting — can be 200k+ occurrences)
   - `filament_maps` in model_settings (e.g., `"1 1 1 1"`)
   - Multiple `filament_colour` entries but only one object-level `extruder` assignment
-- **False positive case**: Fiddle Balls — 10 `filament_colour` entries, `single_extruder_multi_material: "1"`, but zero `paint_color` on any mesh triangle. These are AMS palette leftovers. Correctly falls through to assigned-extruder path (1 colour).
+- **False positive case**: Fiddle Balls — 10 `filament_colour` entries, `single_extruder_multi_material: "1"`, but zero `paint_color` on any mesh triangle. These are AMS palette leftovers. Correctly falls through to layer-tool-change detection (see below).
+
+## Layer-Based Tool Change Support (MultiAsSingle Dual-Colour)
+
+- **Problem**: Bambu files with mid-print filament swaps (e.g., Fiddle Balls "Small dual colour" plate) specify layer-based tool changes in `Metadata/custom_gcode_per_layer.xml`. These were not detected or supported.
+- **How it works**: `custom_gcode_per_layer.xml` contains `<layer type="2" extruder="2" color="#2850E0" top_z="13.6"/>` entries (type 2 = ToolChange in OrcaSlicer enum). OrcaSlicer CLI reads these and emits real `Tn` tool commands at the specified layer heights — no M600 pause-and-swap.
+- **Fix**:
+  1. `parser_3mf.py`: Added `detect_layer_tool_changes()` to parse `custom_gcode_per_layer.xml` and extract per-plate tool change info (z-height, extruder index, colour).
+  2. `parser_3mf.py`: `detect_colors_from_3mf()` now includes colours from layer tool changes — extracts the base extruder colour + all tool-change extruder colours from `filament_colour`.
+  3. `profile_embedder.py`: Added `_has_layer_tool_changes()` and updated routing to use the assignment-preserving embed path when layer tool changes exist (the trimesh rebuild path would destroy `custom_gcode_per_layer.xml`).
+- **Result**: Fiddle Balls now detects 2 colours (`#AF7933`, `#2850E0`) and `has_multicolor: true`. Slicing plate 1 produces real `T0`/`T1` tool changes in G-code.
+- **Key details**:
+  - `type="2"` in the XML = ToolChange (from OrcaSlicer's `CustomGCode::Type` enum)
+  - `<mode value="MultiAsSingle"/>` means all objects use the same extruder, colour changes only at user-specified layers
+  - `custom_gcode_per_layer.xml` is NOT in profile_embedder's strip list — it survives the copy-and-inject path
+  - Colour detection is file-level, not plate-level — so single-colour plates in a multi-plate file with dual-colour plates will also show 2 detected colours. This is cosmetic only; the slicer ignores the second filament for plates without tool changes.
+  - The auto-expand logic uses `max(active_extruders, detected_colors)` so files with layer tool changes auto-expand filament count even when `active_extruders` is just `[1]`.

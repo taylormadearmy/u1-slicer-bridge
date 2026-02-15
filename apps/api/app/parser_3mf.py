@@ -189,6 +189,57 @@ def detect_filament_count_from_3mf(file_path: Path) -> int:
     return 0
 
 
+def detect_layer_tool_changes(file_path: Path) -> Dict[int, List[Dict[str, Any]]]:
+    """Detect per-plate layer-based tool changes from custom_gcode_per_layer.xml.
+
+    Bambu's ``MultiAsSingle`` mode stores mid-print filament swaps as
+    ``<layer type="2" .../>`` entries (type 2 = ToolChange in OrcaSlicer).
+    OrcaSlicer emits real T-commands for these, so on the U1 they become
+    dual-extruder prints.
+
+    Returns a dict mapping plate_id (1-based) to a list of tool-change dicts::
+
+        {1: [{"z": 13.6, "extruder": 2, "color": "#2850E0"}]}
+
+    Returns an empty dict when no tool changes are found.
+    """
+    result: Dict[int, List[Dict[str, Any]]] = {}
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/custom_gcode_per_layer.xml" not in zf.namelist():
+                return result
+            root = ET.fromstring(zf.read("Metadata/custom_gcode_per_layer.xml"))
+            for plate_el in root.findall("plate"):
+                plate_id = 0
+                info = plate_el.find("plate_info")
+                if info is not None:
+                    try:
+                        plate_id = int(info.get("id", "0"))
+                    except ValueError:
+                        pass
+                changes: List[Dict[str, Any]] = []
+                for layer in plate_el.findall("layer"):
+                    ltype = layer.get("type", "")
+                    # type="2" = ToolChange
+                    if ltype != "2":
+                        continue
+                    try:
+                        z = float(layer.get("top_z", "0"))
+                    except ValueError:
+                        z = 0.0
+                    try:
+                        ext = int(layer.get("extruder", "1"))
+                    except ValueError:
+                        ext = 1
+                    color = layer.get("color", "")
+                    changes.append({"z": z, "extruder": ext, "color": color})
+                if changes and plate_id > 0:
+                    result[plate_id] = changes
+    except Exception:
+        pass
+    return result
+
+
 def _has_paint_data(zf: zipfile.ZipFile) -> bool:
     """Check whether any .model file in the archive contains paint_color attributes.
 
@@ -280,6 +331,25 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
                         active_colors = [c for c in filament_colors if c]
                         if active_colors:
                             return active_colors
+
+                # Detect layer-based tool changes (MultiAsSingle dual-colour).
+                # These specify extruder indices that map into filament_colour.
+                layer_changes = detect_layer_tool_changes(file_path)
+                if layer_changes and isinstance(filament_colors, list):
+                    # Collect all extruder indices referenced across all plates
+                    ext_indices: set = {1}  # base extruder is always 1
+                    for changes in layer_changes.values():
+                        for ch in changes:
+                            ext_indices.add(ch.get("extruder", 1))
+                    active_colors = []
+                    for ext in sorted(ext_indices):
+                        idx = ext - 1
+                        if 0 <= idx < len(filament_colors):
+                            c = filament_colors[idx]
+                            if c and c not in active_colors:
+                                active_colors.append(c)
+                    if len(active_colors) > 1:
+                        return active_colors
 
                 # Prefer colors tied to actually assigned extruders when available.
                 if assigned_extruders:

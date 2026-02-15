@@ -118,6 +118,27 @@ class ProfileEmbedder:
             logger.debug(f"Could not detect multi-extruder assignments: {e}")
             return False
 
+    @staticmethod
+    def _has_layer_tool_changes(three_mf_path: Path) -> bool:
+        """Check if custom_gcode_per_layer.xml contains ToolChange entries.
+
+        Bambu's MultiAsSingle mode stores mid-print filament swaps as
+        type="2" entries.  These must be preserved (not stripped by trimesh
+        rebuild) so OrcaSlicer can emit real T-commands.
+        """
+        try:
+            import xml.etree.ElementTree as ET
+            with zipfile.ZipFile(three_mf_path, 'r') as zf:
+                if 'Metadata/custom_gcode_per_layer.xml' not in zf.namelist():
+                    return False
+                root = ET.fromstring(zf.read('Metadata/custom_gcode_per_layer.xml'))
+                for layer in root.findall('.//layer'):
+                    if layer.get('type') == '2':
+                        return True
+            return False
+        except Exception:
+            return False
+
     def _get_assigned_extruder_count(self, three_mf_path: Path) -> int:
         """Get highest assigned extruder index from model_settings.config."""
         try:
@@ -381,11 +402,21 @@ class ProfileEmbedder:
             preserve_model_settings_from = None
             is_bambu = self._is_bambu_file(source_3mf)
             has_multi_assignments = self._has_multi_extruder_assignments(source_3mf)
+            has_layer_changes = self._has_layer_tool_changes(source_3mf)
 
-            if is_bambu and requested_filament_count > 1 and has_multi_assignments:
+            # Use assignment-preserving path for either per-object multicolor
+            # OR layer-based tool changes (MultiAsSingle dual-colour).
+            # Layer tool changes live in custom_gcode_per_layer.xml which
+            # the trimesh rebuild path would destroy.
+            needs_preserve = has_multi_assignments or has_layer_changes
+            if is_bambu and requested_filament_count > 1 and needs_preserve:
+                reason = (
+                    "layer-based tool changes" if has_layer_changes
+                    else "model extruder assignments"
+                )
                 logger.info(
-                    "Detected Bambu multicolor file with model assignments - "
-                    "preserving original geometry and model_settings metadata"
+                    f"Detected Bambu multicolor file with {reason} - "
+                    "preserving original geometry and metadata"
                 )
                 config = self._build_assignment_preserving_config(
                     source_3mf=source_3mf,
