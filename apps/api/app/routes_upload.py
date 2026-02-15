@@ -7,7 +7,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from db import get_pg_pool
 
 logger = logging.getLogger(__name__)
-from parser_3mf import parse_3mf, detect_colors_from_3mf
+from parser_3mf import parse_3mf, detect_colors_from_3mf, detect_print_settings
 from plate_validator import PlateValidator, PlateValidationError
 from config import get_printer_profile
 from multi_plate_parser import parse_multi_plate_3mf
@@ -155,7 +155,15 @@ async def upload_3mf(file: UploadFile = File(...)):
             response["has_multicolor"] = len(detected_colors) > 1
     except Exception as e:
         logger.warning(f"Failed to detect colors: {e}")
-    
+
+    # Detect print settings (support, brim) from 3MF file
+    try:
+        file_print_settings = detect_print_settings(file_path)
+        if file_print_settings:
+            response["file_print_settings"] = file_print_settings
+    except Exception as e:
+        logger.warning(f"Failed to detect print settings: {e}")
+
     # Add multi-plate information if applicable
     if validation.get('is_multi_plate'):
         response.update({
@@ -268,7 +276,15 @@ async def get_upload(upload_id: int):
             response["has_multicolor"] = len(detected_colors) > 1
     except Exception as e:
         logger.warning(f"Failed to detect colors: {e}")
-    
+
+    # Detect print settings (support, brim) from 3MF file
+    try:
+        file_print_settings = detect_print_settings(Path(upload["file_path"]))
+        if file_print_settings:
+            response["file_print_settings"] = file_print_settings
+    except Exception as e:
+        logger.warning(f"Failed to detect print settings: {e}")
+
     return response
 
 

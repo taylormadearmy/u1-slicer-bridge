@@ -20,7 +20,7 @@ from slicer import OrcaSlicer, SlicingError
 from profile_embedder import ProfileEmbedder, ProfileEmbedError
 from multi_plate_parser import parse_multi_plate_3mf, extract_plate_objects, get_plate_bounds
 from plate_validator import PlateValidator
-from parser_3mf import detect_colors_from_3mf, detect_active_extruders_from_3mf, detect_colors_per_plate
+from parser_3mf import detect_colors_from_3mf, detect_active_extruders_from_3mf, detect_colors_per_plate, detect_print_settings
 
 
 router = APIRouter(tags=["slicing"])
@@ -121,6 +121,11 @@ class SliceRequest(BaseModel):
     wall_count: Optional[int] = Field(3, ge=1, le=20)
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
+    support_type: Optional[str] = None  # "normal(auto)", "tree(auto)", "tree(manual)", etc.
+    support_threshold_angle: Optional[int] = Field(None, ge=0, le=90)
+    brim_type: Optional[str] = None  # "auto_brim", "outer_only", "no_brim", etc.
+    brim_width: Optional[float] = Field(None, ge=0, le=50)
+    brim_object_gap: Optional[float] = Field(None, ge=0, le=5)
     enable_prime_tower: Optional[bool] = False
     prime_volume: Optional[int] = Field(None, ge=1, le=500)
     prime_tower_width: Optional[int] = Field(None, ge=10, le=100)
@@ -143,6 +148,11 @@ class SlicePlateRequest(BaseModel):
     wall_count: Optional[int] = Field(3, ge=1, le=20)
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
+    support_type: Optional[str] = None
+    support_threshold_angle: Optional[int] = Field(None, ge=0, le=90)
+    brim_type: Optional[str] = None
+    brim_width: Optional[float] = Field(None, ge=0, le=50)
+    brim_object_gap: Optional[float] = Field(None, ge=0, le=5)
     enable_prime_tower: Optional[bool] = False
     prime_volume: Optional[int] = Field(None, ge=1, le=500)
     prime_tower_width: Optional[int] = Field(None, ge=10, le=100)
@@ -466,7 +476,15 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["sparse_infill_pattern"] = request.infill_pattern
         if request.supports:
             overrides["enable_support"] = "1"
-            overrides["support_type"] = "normal(auto)"
+            overrides["support_type"] = request.support_type or "normal(auto)"
+            if request.support_threshold_angle is not None:
+                overrides["support_threshold_angle"] = str(request.support_threshold_angle)
+        if request.brim_type is not None:
+            overrides["brim_type"] = request.brim_type
+        if request.brim_width is not None:
+            overrides["brim_width"] = str(request.brim_width)
+        if request.brim_object_gap is not None:
+            overrides["brim_object_gap"] = str(request.brim_object_gap)
         if request.enable_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
@@ -948,7 +966,15 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["sparse_infill_pattern"] = request.infill_pattern
         if request.supports:
             overrides["enable_support"] = "1"
-            overrides["support_type"] = "normal(auto)"
+            overrides["support_type"] = request.support_type or "normal(auto)"
+            if request.support_threshold_angle is not None:
+                overrides["support_threshold_angle"] = str(request.support_threshold_angle)
+        if request.brim_type is not None:
+            overrides["brim_type"] = request.brim_type
+        if request.brim_width is not None:
+            overrides["brim_width"] = str(request.brim_width)
+        if request.brim_object_gap is not None:
+            overrides["brim_object_gap"] = str(request.brim_object_gap)
         if request.enable_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
@@ -1247,11 +1273,19 @@ async def get_upload_plates(upload_id: int):
                 })
                 plate_info.append(plate_dict)
 
+        # Detect file-level print settings (support, brim)
+        file_print_settings = {}
+        try:
+            file_print_settings = detect_print_settings(source_3mf)
+        except Exception:
+            pass
+
         return {
             "upload_id": upload_id,
             "filename": upload["filename"],
             "is_multi_plate": True,
             "plate_count": len(plates),
+            "file_print_settings": file_print_settings,
             "plates": plate_info
         }
 

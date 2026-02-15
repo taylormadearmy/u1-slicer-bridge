@@ -524,3 +524,57 @@ def detect_colors_per_plate(file_path: Path) -> Dict[int, List[str]]:
     except Exception:
         pass
     return result
+
+
+def detect_print_settings(file_path: Path) -> Dict[str, Any]:
+    """Extract support/brim print settings from a 3MF's project_settings.config.
+
+    Returns a dict with normalised values.  Empty dict when nothing found.
+    Keys use OrcaSlicer config names so they can round-trip straight through
+    the override pipeline.
+    """
+    settings: Dict[str, Any] = {}
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/project_settings.config" not in zf.namelist():
+                return settings
+            config = json.loads(zf.read("Metadata/project_settings.config"))
+
+            # --- support ---
+            raw = config.get("enable_support")
+            if raw is not None:
+                settings["enable_support"] = str(raw).strip() in ("1", "true", "True")
+
+            raw = config.get("support_type")
+            if raw is not None and str(raw).strip():
+                settings["support_type"] = str(raw).strip()
+
+            raw = config.get("support_threshold_angle")
+            if raw is not None:
+                try:
+                    settings["support_threshold_angle"] = int(float(str(raw)))
+                except (ValueError, TypeError):
+                    pass
+
+            # --- brim ---
+            raw = config.get("brim_type")
+            if raw is not None and str(raw).strip():
+                settings["brim_type"] = str(raw).strip()
+
+            raw = config.get("brim_width")
+            if raw is not None:
+                try:
+                    settings["brim_width"] = round(float(str(raw)), 2)
+                except (ValueError, TypeError):
+                    pass
+
+            raw = config.get("brim_object_gap")
+            if raw is not None:
+                try:
+                    settings["brim_object_gap"] = round(float(str(raw)), 2)
+                except (ValueError, TypeError):
+                    pass
+
+    except Exception:
+        pass
+    return settings

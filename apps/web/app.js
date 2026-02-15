@@ -49,6 +49,7 @@ function app() {
         plates: [],               // Available plates for selected upload
         platesLoading: false,     // Loading state for plates
         detectedColors: [],       // Colors detected from 3MF file
+        fileSettings: null,       // Print settings detected from 3MF file (support, brim)
         filamentOverride: false,  // Whether user wants to manually override filament assignment
         extruderPresets: [
             { slot: 1, filament_id: null, color_hex: '#FFFFFF' },
@@ -88,6 +89,11 @@ function app() {
             wall_count: 3,
             infill_pattern: 'gyroid',
             supports: false,
+            support_type: null,
+            support_threshold_angle: null,
+            brim_type: null,
+            brim_width: null,
+            brim_object_gap: null,
             enable_prime_tower: false,
             prime_volume: null,
             prime_tower_width: null,
@@ -267,6 +273,11 @@ function app() {
                 wall_count: this.machineSettings.wall_count,
                 infill_pattern: this.machineSettings.infill_pattern,
                 supports: this.machineSettings.supports,
+                support_type: null,
+                support_threshold_angle: null,
+                brim_type: null,
+                brim_width: null,
+                brim_object_gap: null,
                 enable_prime_tower: this.machineSettings.enable_prime_tower,
                 prime_volume: this.machineSettings.prime_volume,
                 prime_tower_width: this.machineSettings.prime_tower_width,
@@ -277,6 +288,32 @@ function app() {
                 bed_temp: this.machineSettings.bed_temp,
                 bed_type: this.machineSettings.bed_type,
             };
+        },
+
+        /**
+         * Apply print settings detected from a 3MF file as defaults.
+         * Called after resetJobOverrideSettings() so file values override printer defaults.
+         */
+        applyFileSettings(settings) {
+            if (!settings || Object.keys(settings).length === 0) return;
+            if (settings.enable_support !== undefined) {
+                this.sliceSettings.supports = !!settings.enable_support;
+            }
+            if (settings.support_type) {
+                this.sliceSettings.support_type = settings.support_type;
+            }
+            if (settings.support_threshold_angle !== undefined) {
+                this.sliceSettings.support_threshold_angle = settings.support_threshold_angle;
+            }
+            if (settings.brim_type) {
+                this.sliceSettings.brim_type = settings.brim_type;
+            }
+            if (settings.brim_width !== undefined) {
+                this.sliceSettings.brim_width = settings.brim_width;
+            }
+            if (settings.brim_object_gap !== undefined) {
+                this.sliceSettings.brim_object_gap = settings.brim_object_gap;
+            }
         },
 
         handleJobOverrideToggle(enabled) {
@@ -727,11 +764,23 @@ function app() {
                         this.plates = [];
                         console.log('Single plate file');
                     }
+
+                    // Apply file-embedded print settings (support, brim) as defaults
+                    const fps = platesData.file_print_settings || result.file_print_settings;
+                    this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
+                    if (this.fileSettings) {
+                        this.applyFileSettings(this.fileSettings);
+                        console.log('Applied file print settings:', this.fileSettings);
+                    }
                 } catch (err) {
                     this.platesLoading = false;
                     this.selectedUpload.is_multi_plate = false;
                     this.plates = [];
                     console.warn('Could not load plates for new upload:', err);
+                    // Still try to apply file settings from upload response
+                    const fps = result.file_print_settings;
+                    this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
+                    if (this.fileSettings) this.applyFileSettings(this.fileSettings);
                 }
             } catch (err) {
                 this.uploadProgress = 0;
@@ -797,6 +846,15 @@ function app() {
             } else {
                 this.selectedUpload.is_multi_plate = false;
                 this.plates = [];
+            }
+
+            // Apply file-embedded print settings (support, brim) as defaults
+            const fps = (platesData && platesData.file_print_settings)
+                || (uploadDetails && uploadDetails.file_print_settings);
+            this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
+            if (this.fileSettings) {
+                this.applyFileSettings(this.fileSettings);
+                console.log('Applied file print settings:', this.fileSettings);
             }
         },
 
@@ -906,7 +964,17 @@ function app() {
                     sliceSettings.bed_temp = this.sliceSettings.bed_temp;
                     sliceSettings.bed_type = this.sliceSettings.bed_type;
                 }
-                
+
+                // Always pass through support/brim settings — these may come from
+                // file-detected defaults or user overrides. Without this, file settings
+                // (e.g. tree supports, outer_only brim) would be silently dropped.
+                sliceSettings.supports = this.sliceSettings.supports;
+                sliceSettings.support_type = this.sliceSettings.support_type;
+                sliceSettings.support_threshold_angle = this.sliceSettings.support_threshold_angle;
+                sliceSettings.brim_type = this.sliceSettings.brim_type;
+                sliceSettings.brim_width = this.sliceSettings.brim_width;
+                sliceSettings.brim_object_gap = this.sliceSettings.brim_object_gap;
+
                 // Reorder colors and filament_ids based on extruder assignments
                 if (hasMultiFilaments && this.sliceSettings.extruder_assignments) {
                     const assignments = this.sliceSettings.extruder_assignments;
@@ -1020,6 +1088,7 @@ function app() {
             this.currentStep = 'upload';
             this.activeTab = 'upload';
             this.selectedUpload = null;
+            this.fileSettings = null;
             this.sliceResult = null;
             this.sliceProgress = 0;
             this.uploadProgress = 0;
