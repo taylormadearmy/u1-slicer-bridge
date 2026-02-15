@@ -7,6 +7,8 @@
 
 ## calib-cube-10-dual-colour-merged.3mf
 
-- **Source**: https://makerworld.com/models/2125338
-- **License**: Creative Commons (CC)
-- **Note**: Dual-colour calibration cube used for multicolour slicing tests
+- **Model**: Precision XYZ Calibration Cube 10mm - Test Block
+- **Author**: Mateusz Tokarz
+- **Source**: https://makerworld.com/en/models/2125338
+- **License**: Creative Commons
+- **Note**: Dual-colour variant used for multicolour slicing tests
