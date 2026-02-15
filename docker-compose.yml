@@ -33,6 +33,14 @@ services:
       DATABASE_URL: postgresql://u1slicer:u1slicer@postgres:5432/u1slicer
       REDIS_URL: redis://redis:6379/0
       # MOONRAKER_URL: http://your-printer-ip:7125
+      # ALLOWED_ORIGINS: http://localhost:8080,http://192.168.1.100:8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,6 +49,7 @@ services:
 
   worker:
     build: ./apps/worker
+    restart: unless-stopped
     volumes:
       - data_storage:/data
       - data_cache:/cache
@@ -49,8 +58,10 @@ services:
     build: ./apps/web
     ports:
       - "8080:80"
+    restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   data_storage:

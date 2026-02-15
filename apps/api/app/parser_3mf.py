@@ -408,7 +408,7 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
                                         for c in extruder_colors:
                                             if c not in colors:
                                                 colors.append(c)
-                                except:
+                                except (json.JSONDecodeError, ValueError):
                                     pass
                                     
             except (KeyError, ET.ParseError):

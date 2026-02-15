@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 
 from db import get_pg_pool
@@ -116,19 +116,19 @@ class SliceRequest(BaseModel):
     filament_ids: Optional[List[int]] = None  # Multi-filament support (list of filament IDs)
     filament_id: Optional[int] = None  # Single filament (for backward compatibility)
     filament_colors: Optional[List[str]] = None  # Override colors per extruder (e.g., ["#FF0000", "#00FF00"])
-    layer_height: Optional[float] = 0.2
-    infill_density: Optional[int] = 15
-    wall_count: Optional[int] = 3
+    layer_height: Optional[float] = Field(0.2, ge=0.04, le=0.6)
+    infill_density: Optional[int] = Field(15, ge=0, le=100)
+    wall_count: Optional[int] = Field(3, ge=1, le=20)
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
     enable_prime_tower: Optional[bool] = False
-    prime_volume: Optional[int] = None
-    prime_tower_width: Optional[int] = None
-    prime_tower_brim_width: Optional[int] = None
+    prime_volume: Optional[int] = Field(None, ge=1, le=500)
+    prime_tower_width: Optional[int] = Field(None, ge=10, le=100)
+    prime_tower_brim_width: Optional[int] = Field(None, ge=0, le=20)
     prime_tower_brim_chamfer: Optional[bool] = True
-    prime_tower_brim_chamfer_max_width: Optional[int] = None
-    nozzle_temp: Optional[int] = None
-    bed_temp: Optional[int] = None
+    prime_tower_brim_chamfer_max_width: Optional[int] = Field(None, ge=0, le=50)
+    nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
+    bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
@@ -138,19 +138,19 @@ class SlicePlateRequest(BaseModel):
     filament_ids: Optional[List[int]] = None  # Multi-filament support
     filament_id: Optional[int] = None  # Single filament (backward compat)
     filament_colors: Optional[List[str]] = None  # Override colors per extruder
-    layer_height: Optional[float] = 0.2
-    infill_density: Optional[int] = 15
-    wall_count: Optional[int] = 3
+    layer_height: Optional[float] = Field(0.2, ge=0.04, le=0.6)
+    infill_density: Optional[int] = Field(15, ge=0, le=100)
+    wall_count: Optional[int] = Field(3, ge=1, le=20)
     infill_pattern: Optional[str] = "gyroid"
     supports: Optional[bool] = False
     enable_prime_tower: Optional[bool] = False
-    prime_volume: Optional[int] = None
-    prime_tower_width: Optional[int] = None
-    prime_tower_brim_width: Optional[int] = None
+    prime_volume: Optional[int] = Field(None, ge=1, le=500)
+    prime_tower_width: Optional[int] = Field(None, ge=10, le=100)
+    prime_tower_brim_width: Optional[int] = Field(None, ge=0, le=20)
     prime_tower_brim_chamfer: Optional[bool] = True
-    prime_tower_brim_chamfer_max_width: Optional[int] = None
-    nozzle_temp: Optional[int] = None
-    bed_temp: Optional[int] = None
+    prime_tower_brim_chamfer_max_width: Optional[int] = Field(None, ge=0, le=50)
+    nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
+    bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
@@ -1358,7 +1358,7 @@ async def get_slicing_job(job_id: str):
     if job["filament_colors"]:
         try:
             filament_colors = json.loads(job["filament_colors"])
-        except:
+        except (json.JSONDecodeError, ValueError):
             pass
 
     result = {

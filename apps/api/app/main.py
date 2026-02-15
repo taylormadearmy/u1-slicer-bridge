@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 import json
+import os
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from db import init_db, close_db
@@ -26,9 +27,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # Configure CORS to allow web UI to access API
+# Override with ALLOWED_ORIGINS env var (comma-separated) for non-localhost deployments
+_default_origins = ["http://localhost:8080", "http://127.0.0.1:8080"]
+_allowed_origins = os.environ.get("ALLOWED_ORIGINS")
+_cors_origins = [o.strip() for o in _allowed_origins.split(",") if o.strip()] if _allowed_origins else _default_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,12 +100,12 @@ async def printer_status():
 class FilamentCreate(BaseModel):
     name: str
     material: str
-    nozzle_temp: int
-    bed_temp: int
-    print_speed: Optional[int] = 60
+    nozzle_temp: int = Field(..., ge=100, le=400)
+    bed_temp: int = Field(..., ge=0, le=150)
+    print_speed: Optional[int] = Field(60, ge=5, le=600)
     bed_type: str = "PEI"
     color_hex: str = "#FFFFFF"
-    extruder_index: int = 0
+    extruder_index: int = Field(0, ge=0, le=3)
     is_default: bool = False
     source_type: str = "manual"
 
@@ -108,12 +113,12 @@ class FilamentCreate(BaseModel):
 class FilamentUpdate(BaseModel):
     name: str
     material: str
-    nozzle_temp: int
-    bed_temp: int
-    print_speed: Optional[int] = 60
+    nozzle_temp: int = Field(..., ge=100, le=400)
+    bed_temp: int = Field(..., ge=0, le=150)
+    print_speed: Optional[int] = Field(60, ge=5, le=600)
     bed_type: str = "PEI"
     color_hex: str = "#FFFFFF"
-    extruder_index: int = 0
+    extruder_index: int = Field(0, ge=0, le=3)
     is_default: bool = False
     source_type: str = "manual"
 
