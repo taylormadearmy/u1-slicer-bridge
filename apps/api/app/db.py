@@ -24,7 +24,15 @@ async def init_db():
         if schema_path.exists():
             schema_sql = schema_path.read_text()
             # Split on semicolons and execute each statement individually
-            statements = [s.strip() for s in schema_sql.split(';') if s.strip() and not s.strip().startswith('--')]
+            # Strip leading comment lines from each block before checking if it's empty
+            raw_parts = [s.strip() for s in schema_sql.split(';') if s.strip()]
+            statements = []
+            for part in raw_parts:
+                # Remove leading comment-only lines to get to actual SQL
+                lines = part.split('\n')
+                sql_lines = [l for l in lines if l.strip() and not l.strip().startswith('--')]
+                if sql_lines:
+                    statements.append(part)  # Execute the full block (Postgres handles comments)
             for statement in statements:
                 try:
                     await conn.execute(statement)

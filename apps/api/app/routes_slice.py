@@ -1,5 +1,6 @@
 """Slicing endpoints for converting uploads to G-code (plate-based workflow)."""
 
+import asyncio
 import uuid
 import logging
 import shutil
@@ -20,7 +21,7 @@ from slicer import OrcaSlicer, SlicingError
 from profile_embedder import ProfileEmbedder, ProfileEmbedError
 from multi_plate_parser import parse_multi_plate_3mf, extract_plate_objects, get_plate_bounds
 from plate_validator import PlateValidator
-from parser_3mf import detect_colors_from_3mf, detect_active_extruders_from_3mf, detect_colors_per_plate, detect_print_settings
+from parser_3mf import detect_colors_from_3mf, detect_colors_per_plate, detect_print_settings, extract_3mf_metadata_batch
 
 
 router = APIRouter(tags=["slicing"])
@@ -262,7 +263,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Validate upload exists
         upload = await conn.fetchrow(
             """
-            SELECT id, filename, file_path, bounds_warning
+            SELECT id, filename, file_path, bounds_warning, detected_colors
             FROM uploads
             WHERE id = $1
             """,
@@ -281,7 +282,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         filament_ids = get_filament_ids(request)
         if len(filament_ids) > 4:
             raise HTTPException(status_code=400, detail="U1 supports at most 4 extruders (max 4 filament_ids).")
-        
+
         # Validate all filaments exist and fetch their settings
         filament_rows = await conn.fetch(
             """
@@ -315,15 +316,24 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.error(f"Source 3MF file not found: {source_3mf}")
             raise HTTPException(status_code=500, detail="Source 3MF file not found")
 
-        # Detect colors from 3MF file for viewer
+        # Use cached colors from DB, fall back to re-parsing for old uploads
         detected_colors = []
-        try:
-            detected_colors = detect_colors_from_3mf(source_3mf)
-            job_logger.info(f"Detected colors from 3MF: {detected_colors}")
-        except Exception as e:
-            job_logger.warning(f"Could not detect colors from 3MF: {e}")
+        if upload["detected_colors"]:
+            try:
+                detected_colors = json.loads(upload["detected_colors"])
+                job_logger.info(f"Using cached colors: {detected_colors}")
+            except Exception:
+                pass
+        if not detected_colors:
+            try:
+                detected_colors = detect_colors_from_3mf(source_3mf)
+                job_logger.info(f"Detected colors from 3MF: {detected_colors}")
+            except Exception as e:
+                job_logger.warning(f"Could not detect colors from 3MF: {e}")
 
-        active_extruders = detect_active_extruders_from_3mf(source_3mf)
+        # Single-pass metadata extraction (avoids multiple ZIP opens)
+        file_meta = extract_3mf_metadata_batch(source_3mf)
+        active_extruders = file_meta["active_extruders"]
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
 
@@ -506,7 +516,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["machine_unload_filament_time"] = "0"
 
         try:
-            embedder.embed_profiles(
+            await embedder.embed_profiles_async(
                 source_3mf=source_3mf,
                 output_3mf=embedded_3mf,
                 filament_settings=filament_settings,
@@ -514,6 +524,9 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 requested_filament_count=extruder_count,
                 extruder_remap=None,
                 preserve_geometry=True,
+                precomputed_is_bambu=file_meta["is_bambu"],
+                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
+                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -521,12 +534,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.error(f"Failed to embed profiles: {str(e)}")
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
-        # Slice with Orca
+        # Slice with Orca (async to avoid blocking other API requests)
         job_logger.info("Invoking Orca Slicer...")
         printer_profile = get_printer_profile("snapmaker_u1")
         slicer = OrcaSlicer(printer_profile)
 
-        result = slicer.slice_3mf(embedded_3mf, workspace)
+        result = await slicer.slice_3mf_async(embedded_3mf, workspace)
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -555,10 +568,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             else:
                 job_logger.info(f"Tool remap skipped: {remap_result}")
 
-        # Parse G-code metadata
+        # Parse G-code metadata (async to avoid blocking event loop)
         job_logger.info("Parsing G-code metadata...")
-        metadata = slicer.parse_gcode_metadata(gcode_workspace_path)
-        used_tools = slicer.get_used_tools(gcode_workspace_path)
+        metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
+        used_tools = await asyncio.to_thread(slicer.get_used_tools, gcode_workspace_path)
         job_logger.info(f"Tools used in G-code: {used_tools}")
 
         # Strict validation: when multicolor is requested, output must use T1+
@@ -731,7 +744,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         # Validate upload exists
         upload = await conn.fetchrow(
             """
-            SELECT id, filename, file_path, bounds_warning
+            SELECT id, filename, file_path, bounds_warning, detected_colors
             FROM uploads
             WHERE id = $1
             """,
@@ -748,13 +761,20 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"Source 3MF file not found: {source_3mf}")
             raise HTTPException(status_code=500, detail="Source 3MF file not found")
 
-        # Detect colors from 3MF file for viewer
+        # Use cached colors from DB, fall back to re-parsing for old uploads
         detected_colors = []
-        try:
-            detected_colors = detect_colors_from_3mf(source_3mf)
-            job_logger.info(f"Detected colors from 3MF: {detected_colors}")
-        except Exception as e:
-            job_logger.warning(f"Could not detect colors from 3MF: {e}")
+        if upload["detected_colors"]:
+            try:
+                detected_colors = json.loads(upload["detected_colors"])
+                job_logger.info(f"Using cached colors: {detected_colors}")
+            except Exception:
+                pass
+        if not detected_colors:
+            try:
+                detected_colors = detect_colors_from_3mf(source_3mf)
+                job_logger.info(f"Detected colors from 3MF: {detected_colors}")
+            except Exception as e:
+                job_logger.warning(f"Could not detect colors from 3MF: {e}")
 
         plates, is_multi_plate = parse_multi_plate_3mf(source_3mf)
         if not is_multi_plate:
@@ -805,7 +825,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         # Preserve request order and allow duplicate filament IDs
         filaments = [filament_by_id[fid] for fid in filament_ids]
 
-        active_extruders = detect_active_extruders_from_3mf(source_3mf)
+        # Single-pass metadata extraction (avoids multiple ZIP opens)
+        file_meta = extract_3mf_metadata_batch(source_3mf)
+        active_extruders = file_meta["active_extruders"]
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
 
@@ -994,13 +1016,16 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["machine_unload_filament_time"] = "0"
 
         try:
-            embedder.embed_profiles(
+            await embedder.embed_profiles_async(
                 source_3mf=source_3mf,
                 output_3mf=embedded_3mf,
                 filament_settings=filament_settings,
                 overrides=overrides,
                 requested_filament_count=extruder_count,
                 extruder_remap=None,
+                precomputed_is_bambu=file_meta["is_bambu"],
+                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
+                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -1008,11 +1033,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"Failed to embed profiles: {str(e)}")
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
-        # Slice with Orca
+        # Slice with Orca (async to avoid blocking other API requests)
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
 
-        result = slicer.slice_3mf(embedded_3mf, workspace, plate_index=request.plate_id)
+        result = await slicer.slice_3mf_async(embedded_3mf, workspace, plate_index=request.plate_id)
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -1041,10 +1066,10 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             else:
                 job_logger.info(f"Tool remap skipped: {remap_result}")
 
-        # Parse G-code metadata
+        # Parse G-code metadata (async to avoid blocking event loop)
         job_logger.info("Parsing G-code metadata...")
-        metadata = slicer.parse_gcode_metadata(gcode_workspace_path)
-        used_tools = slicer.get_used_tools(gcode_workspace_path)
+        metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
+        used_tools = await asyncio.to_thread(slicer.get_used_tools, gcode_workspace_path)
         job_logger.info(f"Tools used in G-code: {used_tools}")
 
         # For selected-plate slices, gracefully accept single-tool output.
@@ -1183,10 +1208,10 @@ async def get_upload_plates(upload_id: int):
     """Get plate information for a multi-plate 3MF upload."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
-        # Validate upload exists
         upload = await conn.fetchrow(
             """
-            SELECT id, filename, file_path
+            SELECT id, filename, file_path, is_multi_plate, plate_count,
+                   detected_colors, file_print_settings, plate_metadata
             FROM uploads
             WHERE id = $1
             """,
@@ -1196,14 +1221,43 @@ async def get_upload_plates(upload_id: int):
         if not upload:
             raise HTTPException(status_code=404, detail="Upload not found")
 
-    # Check if this is a multi-plate file
+    # Fast path: return cached plate metadata if available
+    if upload["plate_metadata"]:
+        try:
+            cached_plates = json.loads(upload["plate_metadata"])
+            file_ps = json.loads(upload["file_print_settings"]) if upload["file_print_settings"] else {}
+
+            # Reconstruct preview URLs (they depend on upload_id in the path)
+            for plate in cached_plates:
+                pid = plate.get("plate_id")
+                if plate.get("has_preview"):
+                    plate["preview_url"] = f"/api/uploads/{upload_id}/plates/{pid}/preview"
+                elif plate.get("has_generic_preview"):
+                    plate["preview_url"] = f"/api/uploads/{upload_id}/preview"
+                else:
+                    plate["preview_url"] = None
+                plate.pop("has_preview", None)
+                plate.pop("has_generic_preview", None)
+
+            return {
+                "upload_id": upload_id,
+                "filename": upload["filename"],
+                "is_multi_plate": bool(upload["is_multi_plate"]),
+                "plate_count": upload["plate_count"] or len(cached_plates),
+                "file_print_settings": file_ps,
+                "plates": cached_plates
+            }
+        except Exception as e:
+            logger.warning(f"Failed to read cached plate metadata, falling back to re-parse: {e}")
+
+    # Slow fallback for uploads created before the cache columns existed
     source_3mf = Path(upload["file_path"])
     if not source_3mf.exists():
         raise HTTPException(status_code=500, detail="Source 3MF file not found")
 
     try:
         plates, is_multi_plate = parse_multi_plate_3mf(source_3mf)
-        
+
         if not is_multi_plate:
             return {
                 "upload_id": upload_id,
@@ -1212,7 +1266,6 @@ async def get_upload_plates(upload_id: int):
                 "plates": []
             }
 
-        # Get validation info and per-plate colors
         printer_profile = get_printer_profile("snapmaker_u1")
         validator = PlateValidator(printer_profile)
         preview_assets = _index_preview_assets(source_3mf)
@@ -1220,7 +1273,6 @@ async def get_upload_plates(upload_id: int):
         preview_map: Dict[int, str] = preview_map_obj if isinstance(preview_map_obj, dict) else {}
         has_generic_preview = isinstance(preview_assets.get("best"), str)
 
-        # Per-plate color detection (falls back to global colors)
         try:
             colors_per_plate = detect_colors_per_plate(source_3mf)
         except Exception:
@@ -1236,7 +1288,7 @@ async def get_upload_plates(upload_id: int):
         for plate in plates:
             try:
                 validation = validator.validate_3mf_bounds(source_3mf, plate.plate_id)
-                
+
                 plate_dict = plate.to_dict()
                 plate_colors = colors_per_plate.get(plate.plate_id, global_colors)
                 plate_dict.update({
@@ -1273,7 +1325,6 @@ async def get_upload_plates(upload_id: int):
                 })
                 plate_info.append(plate_dict)
 
-        # Detect file-level print settings (support, brim)
         file_print_settings = {}
         try:
             file_print_settings = detect_print_settings(source_3mf)

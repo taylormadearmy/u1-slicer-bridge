@@ -18,6 +18,13 @@ ALTER TABLE uploads ADD COLUMN IF NOT EXISTS bounds_max_y REAL;
 ALTER TABLE uploads ADD COLUMN IF NOT EXISTS bounds_max_z REAL;
 ALTER TABLE uploads ADD COLUMN IF NOT EXISTS bounds_warning TEXT;
 
+-- Upload metadata cache (avoids re-parsing 3MF on every GET request)
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS is_multi_plate BOOLEAN DEFAULT false;
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS plate_count INTEGER DEFAULT 0;
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS detected_colors TEXT;      -- JSON array of hex color strings
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_print_settings TEXT;  -- JSON object of support/brim settings
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS plate_metadata TEXT;       -- JSON: full plate info with bounds, validation, colors, previews
+
 -- ============================================================================
 -- OLD TABLES (removed - plate-based workflow)
 -- ============================================================================

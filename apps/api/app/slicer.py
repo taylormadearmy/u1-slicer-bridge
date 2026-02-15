@@ -1,5 +1,6 @@
 """Orca Slicer orchestration for G-code generation."""
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -204,6 +205,18 @@ class OrcaSlicer:
             raise SlicingError("Slicing timed out after 5 minutes")
         except Exception as e:
             raise SlicingError(f"Slicing command failed: {str(e)}")
+
+    async def slice_3mf_async(
+        self,
+        three_mf_path: Path,
+        workspace: Path,
+        output_name: str = "output.gcode",
+        plate_index: Optional[int] = None,
+    ) -> Dict:
+        """Async version of slice_3mf — runs in thread pool to avoid blocking the event loop."""
+        return await asyncio.to_thread(
+            self.slice_3mf, three_mf_path, workspace, output_name, plate_index
+        )
 
     def parse_gcode_metadata(self, gcode_path: Path) -> Dict:
         """Extract metadata from generated G-code."""

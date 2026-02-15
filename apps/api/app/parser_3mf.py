@@ -578,3 +578,64 @@ def detect_print_settings(file_path: Path) -> Dict[str, Any]:
     except Exception:
         pass
     return settings
+
+
+def extract_3mf_metadata_batch(file_path: Path) -> Dict[str, Any]:
+    """Single-pass metadata extraction from a 3MF file.
+
+    Opens the ZIP once and extracts all metadata used by the slice pipeline,
+    avoiding multiple independent ZIP opens.
+
+    Returns dict with:
+        active_extruders: sorted unique assigned extruder indices (1-based)
+        is_bambu: whether this is a Bambu Studio file
+        has_multi_extruder_assignments: whether model has >1 extruder assignment
+        has_layer_tool_changes: whether custom_gcode_per_layer.xml has ToolChange entries
+    """
+    result: Dict[str, Any] = {
+        "active_extruders": [],
+        "is_bambu": False,
+        "has_multi_extruder_assignments": False,
+        "has_layer_tool_changes": False,
+    }
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            names = set(zf.namelist())
+
+            # Bambu detection (same check as ProfileEmbedder._is_bambu_file)
+            bambu_markers = {
+                'Metadata/model_settings.config',
+                'Metadata/slice_info.config',
+                'Metadata/filament_sequence.json'
+            }
+            result["is_bambu"] = bool(bambu_markers & names)
+
+            # Extruder assignments from model_settings.config
+            if 'Metadata/model_settings.config' in names:
+                root = ET.fromstring(zf.read('Metadata/model_settings.config'))
+                extruders = set()
+                for meta in root.findall('.//metadata'):
+                    if meta.get('key') == 'extruder':
+                        raw = (meta.get('value') or '').strip()
+                        if raw:
+                            try:
+                                idx = int(raw)
+                                if idx > 0:
+                                    extruders.add(idx)
+                            except ValueError:
+                                pass
+                result["active_extruders"] = sorted(extruders)
+                result["has_multi_extruder_assignments"] = len(extruders) > 1
+
+            # Layer tool changes from custom_gcode_per_layer.xml
+            if 'Metadata/custom_gcode_per_layer.xml' in names:
+                root = ET.fromstring(zf.read('Metadata/custom_gcode_per_layer.xml'))
+                for layer in root.findall('.//layer'):
+                    if layer.get('type') == '2':
+                        result["has_layer_tool_changes"] = True
+                        break
+    except Exception:
+        pass
+
+    return result

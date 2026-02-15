@@ -4,12 +4,13 @@ Embeds Orca Slicer profiles into existing 3MF files while preserving geometry.
 Handles Bambu Studio files by extracting clean geometry with trimesh.
 """
 
+import asyncio
 import json
 import zipfile
 import shutil
 import logging
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
@@ -372,7 +373,10 @@ class ProfileEmbedder:
                        overrides: Dict[str, Any],
                        requested_filament_count: int = 1,
                        extruder_remap: Dict[int, int] | None = None,
-                       preserve_geometry: bool = False) -> Path:
+                       preserve_geometry: bool = False,
+                       precomputed_is_bambu: Optional[bool] = None,
+                       precomputed_has_multi_assignments: Optional[bool] = None,
+                       precomputed_has_layer_changes: Optional[bool] = None) -> Path:
         """Copy original 3MF and inject Orca profiles.
 
         Preserves all original geometry, transforms, and positioning.
@@ -399,10 +403,11 @@ class ProfileEmbedder:
             profiles = self.load_snapmaker_profiles()
 
             # Check if this is a Bambu file that needs rebuilding
+            # Use precomputed values when available (avoids redundant ZIP opens)
             preserve_model_settings_from = None
-            is_bambu = self._is_bambu_file(source_3mf)
-            has_multi_assignments = self._has_multi_extruder_assignments(source_3mf)
-            has_layer_changes = self._has_layer_tool_changes(source_3mf)
+            is_bambu = precomputed_is_bambu if precomputed_is_bambu is not None else self._is_bambu_file(source_3mf)
+            has_multi_assignments = precomputed_has_multi_assignments if precomputed_has_multi_assignments is not None else self._has_multi_extruder_assignments(source_3mf)
+            has_layer_changes = precomputed_has_layer_changes if precomputed_has_layer_changes is not None else self._has_layer_tool_changes(source_3mf)
 
             # Use assignment-preserving path for either per-object multicolor
             # OR layer-based tool changes (MultiAsSingle dual-colour).
@@ -488,6 +493,10 @@ class ProfileEmbedder:
                 temp_working.unlink()
             logger.error(f"Failed to embed profiles: {str(e)}")
             raise ProfileEmbedError(f"Profile embedding failed: {str(e)}") from e
+
+    async def embed_profiles_async(self, **kwargs) -> Path:
+        """Async version of embed_profiles — runs in thread pool to avoid blocking the event loop."""
+        return await asyncio.to_thread(self.embed_profiles, **kwargs)
 
     def _copy_and_inject_settings(
         self,
@@ -595,8 +604,14 @@ class ProfileEmbedder:
 
         return model_settings_bytes
 
+    # Module-level profile cache (profiles are static within a Docker image)
+    _cached_profiles: Optional[ProfileSettings] = None
+    _cached_profiles_dir: Optional[Path] = None
+
     def load_snapmaker_profiles(self) -> ProfileSettings:
         """Load default Snapmaker U1 profiles from JSON files.
+
+        Returns cached profiles on subsequent calls (files are static in Docker).
 
         Returns:
             ProfileSettings with printer, process, and filament configs
@@ -604,6 +619,10 @@ class ProfileEmbedder:
         Raises:
             ProfileEmbedError: If profiles cannot be loaded
         """
+        if (ProfileEmbedder._cached_profiles is not None
+                and ProfileEmbedder._cached_profiles_dir == self.profile_dir):
+            return ProfileEmbedder._cached_profiles
+
         try:
             printer_path = self.profile_dir / "printer" / "Snapmaker U1 (0.4 nozzle) - multiplate.json"
             process_path = self.profile_dir / "process" / "0.20mm Standard @Snapmaker U1.json"
@@ -616,9 +635,11 @@ class ProfileEmbedder:
             with open(filament_path) as f:
                 filament = json.load(f)
 
-            logger.debug(f"Loaded profiles: {printer_path.name}, {process_path.name}, {filament_path.name}")
+            logger.info(f"Loaded and cached profiles: {printer_path.name}, {process_path.name}, {filament_path.name}")
 
-            return ProfileSettings(printer=printer, process=process, filament=filament)
+            ProfileEmbedder._cached_profiles = ProfileSettings(printer=printer, process=process, filament=filament)
+            ProfileEmbedder._cached_profiles_dir = self.profile_dir
+            return ProfileEmbedder._cached_profiles
 
         except FileNotFoundError as e:
             raise ProfileEmbedError(f"Profile file not found: {e.filename}")
