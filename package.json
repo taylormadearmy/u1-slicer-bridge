@@ -16,6 +16,7 @@
     "test:settings": "npx playwright test tests/settings.spec.ts",
     "test:files": "npx playwright test tests/file-management.spec.ts",
     "test:errors": "npx playwright test tests/errors.spec.ts",
+    "test:file-settings": "npx playwright test tests/file-settings.spec.ts",
     "test:report": "npx playwright show-report"
   },
   "repository": {

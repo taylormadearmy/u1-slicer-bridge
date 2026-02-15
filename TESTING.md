@@ -57,6 +57,7 @@ Test 3MF files live in `test-data/`:
 | `Dragon Scale infinity.3mf` | Multi-plate file with 3 plates |
 | `Dragon Scale infinity-1-plate-2-colours.3mf` | Single plate, 2 colours |
 | `Dragon Scale infinity-1-plate-2-colours-new-plate.3mf` | Variant for plater_name bug |
+| `Shashibo-h2s-textured.3mf` | Multi-plate, tree supports, outer-only brim, multicolour (file settings detection) |
 
 ### Test Categories
 
