@@ -315,3 +315,19 @@ Then hard refresh browser (Ctrl+Shift+R).
   - Each filament card shows green "Slicer Settings" badge when profile has advanced settings.
   - Export button on each filament card triggers browser JSON download via `api.exportFilamentProfile()`.
 - **Key implementation detail**: The merge only applies the **primary filament's** (first in `filaments` list) slicer_settings. This avoids complexity when different filaments in a multi-extruder job have conflicting advanced settings.
+
+## SEMM (Single Extruder Multi-Material / Painted) Colour Detection
+
+- **Problem**: Bambu-style painted multicolour files (e.g., SpeedBoatRace) were detected as single-colour even though they use 4 filament colours via per-triangle `paint_color` attributes.
+- **Root Cause**: `detect_colors_from_3mf()` in `parser_3mf.py` used `_extract_assigned_extruders()` to find object-level extruder assignments and returned early with only the colours for those assignments. Painted files have a single object with `extruder="1"` but use multiple filament colours via face painting — the colour data lives in `filament_colour` in `project_settings.config` and `paint_color` attributes on mesh triangles, not in per-object extruder assignments.
+- **How to detect SEMM files**: `project_settings.config` contains `"single_extruder_multi_material": "1"` and `filament_colour` has more entries than the number of object-level extruder assignments.
+- **Fix**:
+  1. `parser_3mf.py`: Added early check for `single_extruder_multi_material == "1"` before the assigned-extruder path. When detected, returns all `filament_colour` entries.
+  2. `parser_3mf.py`: Added `detect_filament_count_from_3mf()` helper for downstream use.
+  3. `routes_slice.py` (both endpoints): Changed `required_extruders` and `multicolor_slot_count` to use `max(len(active_extruders), len(detected_colors))` so SEMM painted colours are counted for auto-expand and validation.
+- **Result**: SpeedBoatRace now correctly reports 4 detected colours (`#FFFFFF`, `#000000`, `#0086D6`, `#A2D8E1`) and `has_multicolor: true`.
+- **Key indicators of SEMM painted files**:
+  - `single_extruder_multi_material: "1"` in project settings
+  - `paint_color` attributes on mesh triangles (can be 200k+ occurrences)
+  - `filament_maps` in model_settings (e.g., `"1 1 1 1"`)
+  - Multiple `filament_colour` entries but only one object-level `extruder` assignment

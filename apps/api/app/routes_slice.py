@@ -317,14 +317,17 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
 
-        # Auto-expand single filament to match source file's active extruder count.
-        # Prevents slicer segfault when a multi-extruder Bambu 3MF is sliced with
-        # fewer filaments than the model's assigned extruder count.
-        required_extruders = len(active_extruders) if active_extruders else 0
+        # Auto-expand single filament to match source file's required colour count.
+        # Handles both multi-extruder (per-object assignment) and SEMM painted files
+        # where detected_colors exceeds active_extruders.
+        required_extruders = max(
+            len(active_extruders) if active_extruders else 0,
+            len(detected_colors),
+        )
         if required_extruders > 1 and len(filaments) < required_extruders and required_extruders <= 4:
             job_logger.info(
                 f"Auto-expanding filament list from {len(filaments)} to {required_extruders} "
-                f"to match source file's active extruder assignments"
+                f"to match source file's active extruder/colour count"
             )
             while len(filaments) < required_extruders:
                 filaments.append(filaments[-1])
@@ -342,7 +345,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             if extruder_remap:
                 job_logger.info(f"Applying extruder remap: {extruder_remap}")
 
-        multicolor_slot_count = len(active_extruders) if active_extruders else len(detected_colors)
+        multicolor_slot_count = max(
+            len(active_extruders) if active_extruders else 0,
+            len(detected_colors),
+        )
         if len(filaments) > 1 and multicolor_slot_count > 4:
             raise HTTPException(
                 status_code=400,
@@ -785,14 +791,17 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
 
-        # Auto-expand single filament to match source file's active extruder count.
-        # Prevents slicer segfault when a multi-extruder Bambu 3MF is sliced with
-        # fewer filaments than the model's assigned extruder count.
-        required_extruders = len(active_extruders) if active_extruders else 0
+        # Auto-expand single filament to match source file's required colour count.
+        # Handles both multi-extruder (per-object assignment) and SEMM painted files
+        # where detected_colors exceeds active_extruders.
+        required_extruders = max(
+            len(active_extruders) if active_extruders else 0,
+            len(detected_colors),
+        )
         if required_extruders > 1 and len(filaments) < required_extruders and required_extruders <= 4:
             job_logger.info(
                 f"Auto-expanding filament list from {len(filaments)} to {required_extruders} "
-                f"to match source file's active extruder assignments"
+                f"to match source file's active extruder/colour count"
             )
             while len(filaments) < required_extruders:
                 filaments.append(filaments[-1])
@@ -810,7 +819,10 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             if extruder_remap:
                 job_logger.info(f"Applying extruder remap: {extruder_remap}")
 
-        multicolor_slot_count = len(active_extruders) if active_extruders else len(detected_colors)
+        multicolor_slot_count = max(
+            len(active_extruders) if active_extruders else 0,
+            len(detected_colors),
+        )
         if len(filaments) > 1 and multicolor_slot_count > 4:
             raise HTTPException(
                 status_code=400,

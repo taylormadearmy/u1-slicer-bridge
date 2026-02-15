@@ -169,6 +169,26 @@ def detect_active_extruders_from_3mf(file_path: Path) -> List[int]:
     return _extract_assigned_extruders(file_path)
 
 
+def detect_filament_count_from_3mf(file_path: Path) -> int:
+    """Return the number of filament slots defined in project_settings.config.
+
+    For single-extruder-multi-material (painted) files this may exceed the
+    number of object-level extruder assignments because colour painting uses
+    per-triangle filament indices rather than per-object assignments.
+    """
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/project_settings.config" not in zf.namelist():
+                return 0
+            settings = json.loads(zf.read("Metadata/project_settings.config"))
+            filament_colours = settings.get("filament_colour", [])
+            if isinstance(filament_colours, list):
+                return len(filament_colours)
+    except Exception:
+        pass
+    return 0
+
+
 def detect_colors_from_3mf(file_path: Path) -> List[str]:
     """
     Detect colors from a .3mf file.
@@ -218,10 +238,21 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
                 settings_data = zf.read("Metadata/project_settings.config")
                 settings = json.loads(settings_data)
 
+                # Detect single-extruder multi-material (painted) files.
+                # These have one object-level extruder assignment but use
+                # multiple filament colours via per-triangle paint_color.
+                filament_colors = settings.get("filament_colour", [])
+                is_semm = str(settings.get("single_extruder_multi_material", "0")) == "1"
+
+                if is_semm and isinstance(filament_colors, list) and len(filament_colors) > 1:
+                    # Return all defined filament colours for painted files
+                    active_colors = [c for c in filament_colors if c]
+                    if active_colors:
+                        return active_colors
+
                 # Prefer colors tied to actually assigned extruders when available.
                 if assigned_extruders:
                     active_colors = []
-                    filament_colors = settings.get("filament_colour", [])
                     if isinstance(filament_colors, list):
                         for ext in assigned_extruders:
                             idx = ext - 1
