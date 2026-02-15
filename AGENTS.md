@@ -398,7 +398,6 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Fix**: `profile_embedder.py` now sanitizes `model_settings.config` and clears non-empty `plater_name` values before slicing.
 - **Result**:
   - `Dragon Scale infinity-1-plate-2-colours.3mf` now slices multicolour successfully (`T0`, `T1`).
-  - `Pokerchips-smaller.3mf` multicolour path also succeeds with real tool changes.
 
 **Fixed: Multi-Plate `slice-plate` Multicolour Crash Path**
 - **Problem**: `POST /uploads/{id}/slice-plate` could still crash/fail for Poker/Dragon while full-file slice succeeded.
@@ -410,10 +409,10 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Result**: Poker/Dragon multi-plate `slice-plate` now succeeds with real tool changes (`T0`, `T1`).
 
 **Adjusted: Bambu Negative-Z Upload Warning Noise**
-- **Problem**: Some Bambu exports (e.g., Pokerchips) showed `Objects extend below bed` warnings despite valid slicing/printing paths.
+- **Problem**: Some Bambu exports showed `Objects extend below bed` warnings despite valid slicing/printing paths.
 - **Root Cause**: Raw 3MF source offsets (`source_offset_z` in `model_settings.config`) can produce negative scene bounds in validation, even when slicer placement is valid.
 - **Fix**: `plate_validator.py` now suppresses below-bed warnings for likely Bambu source-offset artifacts while keeping build-volume checks unchanged.
-- **Result**: Poker no longer shows misleading below-bed warnings in upload/configure flows.
+- **Result**: Bambu exports no longer show misleading below-bed warnings in upload/configure flows.
 
 **Fixed: Sliced History Not Updating Immediately**
 - **Problem**: Newly completed slices were not appearing in "Sliced Files" until browser refresh.
@@ -772,7 +771,6 @@ Test 3MF files live in `test-data/`:
 | `Dragon Scale infinity.3mf` | Multi-plate file with 3 plates |
 | `Dragon Scale infinity-1-plate-2-colours.3mf` | Single plate, 2 colours |
 | `Dragon Scale infinity-1-plate-2-colours-new-plate.3mf` | Variant for plater_name bug |
-| `Pokerchips-smaller.3mf` | Multicolour + extruder assignment |
 
 ### Test Speed Categories
 
