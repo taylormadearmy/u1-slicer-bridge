@@ -3,10 +3,10 @@ import { waitForApp, getAppState, fixture } from './helpers';
 import fs from 'fs';
 import path from 'path';
 
-test.describe('Settings Tab', () => {
+test.describe('Settings Modal', () => {
   test.beforeEach(async ({ page }) => {
     await waitForApp(page);
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByTitle('Settings').click();
   });
 
   test('Printer Defaults section is visible', async ({ page }) => {

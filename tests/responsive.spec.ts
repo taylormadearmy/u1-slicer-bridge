@@ -21,9 +21,8 @@ test.describe('Responsive Design', () => {
       const dropzone = page.locator('[x-ref="dropzone"]');
       await expect(dropzone).toBeVisible();
 
-      // Tab buttons should be visible
-      await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+      // Settings gear icon should be visible in header
+      await expect(page.getByTitle('Settings')).toBeVisible();
     });
   }
 });

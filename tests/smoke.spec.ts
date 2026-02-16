@@ -57,13 +57,15 @@ test.describe('Smoke Tests', () => {
     expect(health.status).toBe('ok');
   });
 
-  test('tabs switch between Upload and Settings', async ({ page }) => {
-    // Switch to Settings
-    await page.getByRole('button', { name: 'Settings' }).click();
+  test('settings modal opens and closes via gear icon', async ({ page }) => {
+    // Open settings modal via gear icon
+    await page.getByTitle('Settings').click();
+    await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Printer Defaults' })).toBeVisible();
 
-    // Switch back to Upload
-    await page.getByRole('button', { name: 'Upload' }).click();
+    // Close settings modal via X button
+    await page.getByTitle('Close').click();
+    await expect(page.getByRole('heading', { name: 'Printer Defaults' })).not.toBeVisible();
     await expect(page.getByText('Upload 3MF File')).toBeVisible();
   });
 });

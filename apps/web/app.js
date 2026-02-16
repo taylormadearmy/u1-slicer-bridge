@@ -13,7 +13,8 @@ function app() {
 
         // Current workflow step: 'upload' | 'configure' | 'slicing' | 'complete'
         currentStep: 'upload',
-        activeTab: 'upload', // 'upload' | 'settings'
+        activeTab: 'upload', // kept for compatibility — always 'upload' now
+        showSettingsModal: false,
 
         // Data
         uploads: [],
@@ -407,7 +408,11 @@ function app() {
         },
 
         openSettings() {
-            this.activeTab = 'settings';
+            this.showSettingsModal = true;
+        },
+
+        closeSettings() {
+            this.showSettingsModal = false;
         },
 
         openUpload() {
@@ -764,6 +769,7 @@ function app() {
             console.log(`Uploading: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
             this.currentStep = 'upload';
             this.activeTab = 'upload';
+            this.showSettingsModal = false;
             this.uploadProgress = 0;
             this.uploadPhase = 'uploading';
 
