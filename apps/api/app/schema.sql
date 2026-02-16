@@ -57,6 +57,7 @@ ALTER TABLE filaments ADD COLUMN IF NOT EXISTS extruder_index INTEGER DEFAULT 0;
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'manual';
 ALTER TABLE filaments ADD COLUMN IF NOT EXISTS slicer_settings TEXT;  -- JSON blob of OrcaSlicer-native filament settings
+ALTER TABLE filaments ADD COLUMN IF NOT EXISTS density REAL DEFAULT 1.24;  -- g/cm³ (PLA default)
 
 -- ============================================================================
 -- OLD TABLES (removed - plate-based workflow)
@@ -119,6 +120,25 @@ CREATE TABLE IF NOT EXISTS slicing_defaults (
     bed_type TEXT,
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_slicing_defaults_single_row CHECK (id = 1)
+);
+
+-- Slicing override columns (3-way mode: model/orca/override)
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS support_type TEXT;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS support_threshold_angle INTEGER;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS brim_type TEXT;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS brim_width REAL;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS brim_object_gap REAL;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_loops INTEGER;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_distance REAL;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_height INTEGER;
+ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS setting_modes TEXT;  -- JSON: {"setting_key": "model"|"orca"|"override"}
+
+-- Persistent printer connection settings
+CREATE TABLE IF NOT EXISTS printer_settings (
+    id INTEGER PRIMARY KEY,
+    moonraker_url TEXT,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_printer_settings_single_row CHECK (id = 1)
 );
 
 -- ============================================================================

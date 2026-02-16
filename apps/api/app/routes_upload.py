@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi.responses import FileResponse
 from db import get_pg_pool
 
 logger = logging.getLogger(__name__)
@@ -43,19 +44,11 @@ async def upload_3mf(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
-    # Parse .3mf and extract object metadata (for informational purposes)
+    # Parse .3mf and extract object/plate metadata (single parse pass)
     try:
-        # Check if this is a multi-plate file
         plates, is_multi_plate = parse_multi_plate_3mf(file_path)
-        
-        if is_multi_plate:
-            # For multi-plate files, we still extract basic object count
-            # using the existing parser for backward compatibility
-            objects = parse_3mf(file_path)
-        else:
-            objects = parse_3mf(file_path)
+        objects = parse_3mf(file_path)
     except ValueError as e:
-        # Clean up failed upload
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -66,11 +59,11 @@ async def upload_3mf(file: UploadFile = File(...)):
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="No valid objects found in .3mf file")
 
-    # Validate plate bounds
+    # Validate plate bounds (pass pre-parsed plates to avoid re-parsing)
     try:
         printer_profile = get_printer_profile("snapmaker_u1")
         validator = PlateValidator(printer_profile)
-        validation = validator.validate_3mf_bounds(file_path)
+        validation = validator.validate_3mf_bounds(file_path, plates=plates)
 
         # For multi-plate files, suppress combined-scene warnings when at least
         # one individual plate fits the build volume.
@@ -79,7 +72,7 @@ async def upload_3mf(file: UploadFile = File(...)):
             for plate in validation.get('plates', []):
                 try:
                     plate_id = plate['plate_id']
-                    plate_validation = validator.validate_3mf_bounds(file_path, plate_id)
+                    plate_validation = validator.validate_3mf_bounds(file_path, plate_id, plates=plates)
                     plate_validations.append({
                         "plate_id": plate['plate_id'],
                         "bounds": plate_validation['bounds'],
@@ -145,7 +138,8 @@ async def upload_3mf(file: UploadFile = File(...)):
                 plate_dict = plate.to_dict() if hasattr(plate, 'to_dict') else (plate if isinstance(plate, dict) else {})
                 pid = plate_dict.get('plate_id') or (plate.plate_id if hasattr(plate, 'plate_id') else None)
 
-                plate_colors = colors_per_plate.get(pid, detected_colors or [])
+                # Per-plate colors if available; else assume single-extruder (first color)
+                plate_colors = colors_per_plate.get(pid, (detected_colors or [])[:1])
                 pv = next((p for p in plate_validations if p.get('plate_id') == pid), {})
 
                 plate_dict.update({
@@ -314,6 +308,29 @@ async def get_upload(upload_id: int):
         response["plate_count"] = upload["plate_count"] or 0
 
     return response
+
+
+@router.get("/{upload_id}/download")
+async def download_3mf(upload_id: int):
+    """Download the original uploaded 3MF file."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            "SELECT file_path, filename FROM uploads WHERE id = $1",
+            upload_id,
+        )
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+    file_path = Path(upload["file_path"])
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="3MF file not found on disk")
+
+    return FileResponse(
+        path=file_path,
+        media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+        filename=upload["filename"],
+    )
 
 
 @router.get("")

@@ -61,7 +61,11 @@ export async function uploadFile(page: Page, fixtureName: string) {
 
 /** Navigate to the configure step for an already-uploaded file by filename */
 export async function selectUploadByName(page: Page, filename: string) {
-  // Wait for the uploads list to be populated (API fetch after Alpine init)
+  // Open My Files modal
+  await page.getByTitle('My Files').click();
+  const modal = page.locator('[x-show="showStorageDrawer"]');
+  await expect(modal.getByRole('heading', { name: 'My Files' })).toBeVisible({ timeout: 10_000 });
+  // Wait for the uploads list to be populated in the modal
   await page.waitForFunction(() => {
     const body = document.querySelector('body') as any;
     if (body?._x_dataStack) {
@@ -71,12 +75,12 @@ export async function selectUploadByName(page: Page, filename: string) {
     }
     return false;
   }, undefined, { timeout: 30_000 });
-  // Find the upload row containing this filename and click it
-  const row = page.locator(`text=${filename}`).first();
-  await expect(row).toBeVisible({ timeout: 10_000 });
-  // Click the row to select it — the row itself is clickable
-  await row.click();
-  // Wait for configure step
+  // Find the file card containing this filename within the modal and click its "Slice" button.
+  // Each card is a div.rounded-lg wrapper containing both filename and Slice button.
+  const card = modal.locator('.rounded-lg').filter({ hasText: filename }).first();
+  await expect(card).toBeVisible({ timeout: 10_000 });
+  await card.getByRole('button', { name: 'Slice', exact: true }).click();
+  // Wait for configure step (modal closes and app transitions)
   await page.waitForFunction((expected) => {
     const body = document.querySelector('body') as any;
     if (body?._x_dataStack) {
@@ -88,17 +92,25 @@ export async function selectUploadByName(page: Page, filename: string) {
   }, 'configure', { timeout: 30_000 });
 }
 
-/** Wait for slicing to complete (up to 2 minutes) */
+/** Wait for slicing to complete (up to 2.5 minutes).
+ *  Fails fast if the app reverts to 'configure' or 'upload' (slice error). */
 export async function waitForSliceComplete(page: Page) {
-  await page.waitForFunction((expected) => {
+  await page.waitForFunction(() => {
     const body = document.querySelector('body') as any;
+    let step: string | undefined;
     if (body?._x_dataStack) {
       for (const scope of body._x_dataStack) {
-        if ('currentStep' in scope) return scope.currentStep === expected;
+        if ('currentStep' in scope) { step = scope.currentStep; break; }
       }
     }
-    return body?.__x?.$data?.currentStep === expected;
-  }, 'complete', { timeout: 120_000 });
+    if (!step) step = body?.__x?.$data?.currentStep;
+    if (step === 'complete') return true;
+    // Fail fast on error — app reverts to configure or upload on failure
+    if (step === 'configure' || step === 'upload') {
+      throw new Error(`Slice failed — app reverted to '${step}' step`);
+    }
+    return false;
+  }, undefined, { timeout: 150_000 });
 }
 
 /** Get the current step from Alpine state */

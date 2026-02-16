@@ -4,7 +4,6 @@ Validates that the entire plate layout fits within the printer's build volume.
 Now supports multi-plate 3MF files - validates individual plates.
 """
 
-import trimesh
 import logging
 import zipfile
 import xml.etree.ElementTree as ET
@@ -34,12 +33,14 @@ class PlateValidator:
         self.printer = printer_profile
         logger.info(f"PlateValidator initialized for {printer_profile.name}")
 
-    def validate_3mf_bounds(self, file_path: Path, plate_id: Optional[int] = None) -> Dict[str, Any]:
+    def validate_3mf_bounds(self, file_path: Path, plate_id: Optional[int] = None,
+                            plates: Optional[List] = None) -> Dict[str, Any]:
         """Load 3MF and calculate bounding box for specific plate or combined scene.
 
         Args:
             file_path: Path to .3mf file
             plate_id: Specific plate ID to validate (None for all plates combined)
+            plates: Pre-parsed plate list from parse_multi_plate_3mf() to avoid redundant parsing
 
         Returns:
             Dictionary containing:
@@ -54,14 +55,16 @@ class PlateValidator:
             PlateValidationError: If 3MF cannot be loaded
         """
         try:
-            logger.info(f"Validating plate bounds for {file_path.name}" + 
+            logger.info(f"Validating plate bounds for {file_path.name}" +
                        (f", plate {plate_id}" if plate_id else ""))
 
-            # Check if this is a multi-plate file
-            plates, is_multi_plate = parse_multi_plate_3mf(file_path)
-            
-            # Get bounds information
-            bounds_info = get_plate_bounds(file_path, plate_id)
+            # Use pre-parsed plates or parse now
+            if plates is None:
+                plates, _ = parse_multi_plate_3mf(file_path)
+            is_multi_plate = len(plates) > 1
+
+            # Get bounds information (pass plates to avoid re-parsing)
+            bounds_info = get_plate_bounds(file_path, plate_id, plates=plates)
             bounds = bounds_info['bounds']
             
             # Calculate dimensions

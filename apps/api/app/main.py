@@ -7,8 +7,8 @@ import json
 import os
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from db import init_db, close_db
-from moonraker import init_moonraker, close_moonraker, get_moonraker
+from db import init_db, close_db, get_pg_pool
+from moonraker import init_moonraker, close_moonraker, get_moonraker, set_moonraker_url
 from routes_upload import router as upload_router
 from routes_slice import router as slice_router
 
@@ -17,7 +17,7 @@ from routes_slice import router as slice_router
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
-    await init_moonraker()
+    await init_moonraker(pool=get_pg_pool())
     yield
     # Shutdown
     await close_moonraker()
@@ -53,6 +53,12 @@ def root():
         "endpoints": {
             "health": "/healthz",
             "printer": "/printer/status",
+            "printer_settings": "GET/PUT /printer/settings",
+            "send_to_printer": "POST /printer/print",
+            "print_status": "GET /printer/print/status",
+            "pause_print": "POST /printer/pause",
+            "resume_print": "POST /printer/resume",
+            "cancel_print": "POST /printer/cancel",
             "upload": "POST /upload",
             "uploads": "GET /upload",
             "slice": "POST /uploads/{id}/slice",
@@ -68,13 +74,13 @@ def health():
 
 @app.get("/printer/status")
 async def printer_status():
-    """Get printer connection status and info."""
+    """Get printer connection status, info, and current print state."""
     client = get_moonraker()
 
     if not client:
         return {
             "connected": False,
-            "message": "Moonraker not configured. Set MOONRAKER_URL environment variable."
+            "message": "Moonraker not configured. Set printer URL in Settings."
         }
 
     is_healthy = await client.health_check()
@@ -88,13 +94,155 @@ async def printer_status():
         server_info = await client.get_server_info()
         printer_info = await client.get_printer_info()
 
+        # Also query print status for header display
+        print_status = None
+        try:
+            print_status = await client.query_print_status()
+        except Exception:
+            pass  # Non-critical
+
         return {
             "connected": True,
             "server": server_info.get("result", {}),
-            "printer": printer_info.get("result", {})
+            "printer": printer_info.get("result", {}),
+            "print_status": print_status,
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Printer error: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Printer Settings (configurable Moonraker URL)
+# ---------------------------------------------------------------------------
+
+@app.get("/printer/settings")
+async def get_printer_settings():
+    """Get printer connection settings."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT moonraker_url FROM printer_settings WHERE id = 1")
+    return {"moonraker_url": row["moonraker_url"] if row else None}
+
+
+class PrinterSettingsUpdate(BaseModel):
+    moonraker_url: Optional[str] = None
+
+@app.put("/printer/settings")
+async def update_printer_settings(body: PrinterSettingsUpdate):
+    """Save printer connection settings and reconnect."""
+    pool = get_pg_pool()
+    url = (body.moonraker_url or "").strip() or None
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO printer_settings (id, moonraker_url, updated_at)
+               VALUES (1, $1, NOW())
+               ON CONFLICT (id) DO UPDATE SET moonraker_url = $1, updated_at = NOW()""",
+            url,
+        )
+
+    # Reconnect (or disconnect) the global Moonraker client
+    await set_moonraker_url(url or "")
+
+    return {"moonraker_url": url, "message": "Saved"}
+
+
+# ---------------------------------------------------------------------------
+# Print Control
+# ---------------------------------------------------------------------------
+
+class PrintRequest(BaseModel):
+    job_id: str
+
+@app.post("/printer/print")
+async def send_to_printer(body: PrintRequest):
+    """Upload G-code to Moonraker and start printing."""
+    client = get_moonraker()
+    if not client:
+        raise HTTPException(status_code=503, detail="Printer not configured. Set URL in Settings.")
+
+    is_healthy = await client.health_check()
+    if not is_healthy:
+        raise HTTPException(status_code=503, detail="Printer not reachable")
+
+    # Look up the G-code file from the job
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        job = await conn.fetchrow(
+            "SELECT gcode_path, status FROM slicing_jobs WHERE job_id = $1",
+            body.job_id,
+        )
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Job not completed")
+
+    from pathlib import Path
+    gcode_path = Path(job["gcode_path"])
+    if not gcode_path.exists():
+        raise HTTPException(status_code=404, detail="G-code file not found on disk")
+
+    filename = f"{body.job_id}.gcode"
+
+    try:
+        await client.upload_gcode(str(gcode_path), filename)
+        await client.start_print(filename)
+        return {"status": "printing", "filename": filename, "message": "Print started"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to send to printer: {str(e)}")
+
+
+@app.get("/printer/print/status")
+async def get_print_status():
+    """Get current print progress and state (lean polling endpoint)."""
+    client = get_moonraker()
+    if not client:
+        raise HTTPException(status_code=503, detail="Printer not configured")
+
+    try:
+        return await client.query_print_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to query print status: {str(e)}")
+
+
+@app.post("/printer/pause")
+async def pause_print():
+    """Pause the current print."""
+    client = get_moonraker()
+    if not client:
+        raise HTTPException(status_code=503, detail="Printer not configured")
+    try:
+        await client.pause_print()
+        return {"status": "paused", "message": "Print paused"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to pause: {str(e)}")
+
+
+@app.post("/printer/resume")
+async def resume_print():
+    """Resume a paused print."""
+    client = get_moonraker()
+    if not client:
+        raise HTTPException(status_code=503, detail="Printer not configured")
+    try:
+        await client.resume_print()
+        return {"status": "printing", "message": "Print resumed"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to resume: {str(e)}")
+
+
+@app.post("/printer/cancel")
+async def cancel_print():
+    """Cancel the current print."""
+    client = get_moonraker()
+    if not client:
+        raise HTTPException(status_code=503, detail="Printer not configured")
+    try:
+        await client.cancel_print()
+        return {"status": "cancelled", "message": "Print cancelled"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to cancel: {str(e)}")
 
 
 class FilamentCreate(BaseModel):
@@ -108,6 +256,7 @@ class FilamentCreate(BaseModel):
     extruder_index: int = Field(0, ge=0, le=3)
     is_default: bool = False
     source_type: str = "manual"
+    density: Optional[float] = Field(1.24, ge=0.5, le=5.0)
 
 
 class FilamentUpdate(BaseModel):
@@ -121,11 +270,13 @@ class FilamentUpdate(BaseModel):
     extruder_index: int = Field(0, ge=0, le=3)
     is_default: bool = False
     source_type: str = "manual"
+    density: Optional[float] = Field(1.24, ge=0.5, le=5.0)
 
 
 async def _ensure_filament_schema(conn):
     await conn.execute("ALTER TABLE filaments ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'manual'")
     await conn.execute("ALTER TABLE filaments ADD COLUMN IF NOT EXISTS slicer_settings TEXT")
+    await conn.execute("ALTER TABLE filaments ADD COLUMN IF NOT EXISTS density REAL DEFAULT 1.24")
 
 
 class ExtruderPreset(BaseModel):
@@ -140,6 +291,14 @@ class SlicingDefaults(BaseModel):
     wall_count: int = 3
     infill_pattern: str = "gyroid"
     supports: bool = False
+    support_type: Optional[str] = None
+    support_threshold_angle: Optional[int] = None
+    brim_type: Optional[str] = None
+    brim_width: Optional[float] = None
+    brim_object_gap: Optional[float] = None
+    skirt_loops: Optional[int] = None
+    skirt_distance: Optional[float] = None
+    skirt_height: Optional[int] = None
     enable_prime_tower: bool = False
     prime_volume: Optional[int] = None
     prime_tower_width: Optional[int] = None
@@ -149,6 +308,7 @@ class SlicingDefaults(BaseModel):
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
+    setting_modes: Optional[dict] = None  # {"key": "model"|"orca"|"override"}
 
 
 class ExtruderPresetUpdate(BaseModel):
@@ -199,6 +359,15 @@ async def _ensure_preset_rows(conn):
     await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS prime_tower_brim_width INTEGER")
     await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS prime_tower_brim_chamfer BOOLEAN NOT NULL DEFAULT TRUE")
     await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS prime_tower_brim_chamfer_max_width INTEGER")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS support_type TEXT")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS support_threshold_angle INTEGER")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS brim_type TEXT")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS brim_width REAL")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS brim_object_gap REAL")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_loops INTEGER")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_distance REAL")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_height INTEGER")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS setting_modes TEXT")
 
     for slot in range(1, 5):
         fallback_filament_id = await conn.fetchval(
@@ -239,7 +408,7 @@ async def get_filaments():
         await _ensure_filament_schema(conn)
         rows = await conn.fetch(
             """
-            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type, slicer_settings
+            SELECT id, name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type, slicer_settings, density
             FROM filaments
             ORDER BY is_default DESC,
                      CASE WHEN UPPER(material) = 'PLA' THEN 0 ELSE 1 END,
@@ -261,6 +430,7 @@ async def get_filaments():
                 "is_default": row["is_default"],
                 "source_type": row["source_type"] or "manual",
                 "has_slicer_settings": bool(row["slicer_settings"]),
+                "density": round(float(row["density"]), 2) if row["density"] is not None else 1.24,
             }
             for row in rows
         ]
@@ -290,11 +460,22 @@ async def get_extruder_presets():
             SELECT layer_height, infill_density, wall_count, infill_pattern,
                    supports, enable_prime_tower, prime_volume, prime_tower_width, prime_tower_brim_width,
                    prime_tower_brim_chamfer, prime_tower_brim_chamfer_max_width,
-                   nozzle_temp, bed_temp, bed_type
+                   nozzle_temp, bed_temp, bed_type,
+                   support_type, support_threshold_angle,
+                   brim_type, brim_width, brim_object_gap,
+                   skirt_loops, skirt_distance, skirt_height,
+                   setting_modes
             FROM slicing_defaults
             WHERE id = 1
             """
         )
+
+    setting_modes = None
+    if defaults["setting_modes"]:
+        try:
+            setting_modes = json.loads(defaults["setting_modes"])
+        except Exception:
+            pass
 
     return {
         "extruders": [
@@ -311,6 +492,14 @@ async def get_extruder_presets():
             "wall_count": defaults["wall_count"],
             "infill_pattern": defaults["infill_pattern"],
             "supports": defaults["supports"],
+            "support_type": defaults["support_type"],
+            "support_threshold_angle": defaults["support_threshold_angle"],
+            "brim_type": defaults["brim_type"],
+            "brim_width": float(defaults["brim_width"]) if defaults["brim_width"] is not None else None,
+            "brim_object_gap": float(defaults["brim_object_gap"]) if defaults["brim_object_gap"] is not None else None,
+            "skirt_loops": defaults["skirt_loops"],
+            "skirt_distance": float(defaults["skirt_distance"]) if defaults["skirt_distance"] is not None else None,
+            "skirt_height": defaults["skirt_height"],
             "enable_prime_tower": defaults["enable_prime_tower"],
             "prime_volume": defaults["prime_volume"],
             "prime_tower_width": defaults["prime_tower_width"],
@@ -320,6 +509,7 @@ async def get_extruder_presets():
             "nozzle_temp": defaults["nozzle_temp"],
             "bed_temp": defaults["bed_temp"],
             "bed_type": defaults["bed_type"],
+            "setting_modes": setting_modes,
         },
     }
 
@@ -369,21 +559,33 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
 
         if payload.slicing_defaults is not None:
             d = payload.slicing_defaults
+            setting_modes_json = json.dumps(d.setting_modes) if d.setting_modes else None
             await conn.execute(
                 """
                 INSERT INTO slicing_defaults (
                     id, layer_height, infill_density, wall_count, infill_pattern,
-                    supports, enable_prime_tower, prime_volume, prime_tower_width, prime_tower_brim_width,
+                    supports, support_type, support_threshold_angle,
+                    brim_type, brim_width, brim_object_gap,
+                    skirt_loops, skirt_distance, skirt_height,
+                    enable_prime_tower, prime_volume, prime_tower_width, prime_tower_brim_width,
                     prime_tower_brim_chamfer, prime_tower_brim_chamfer_max_width,
-                    nozzle_temp, bed_temp, bed_type, updated_at
+                    nozzle_temp, bed_temp, bed_type, setting_modes, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     layer_height = EXCLUDED.layer_height,
                     infill_density = EXCLUDED.infill_density,
                     wall_count = EXCLUDED.wall_count,
                     infill_pattern = EXCLUDED.infill_pattern,
                     supports = EXCLUDED.supports,
+                    support_type = EXCLUDED.support_type,
+                    support_threshold_angle = EXCLUDED.support_threshold_angle,
+                    brim_type = EXCLUDED.brim_type,
+                    brim_width = EXCLUDED.brim_width,
+                    brim_object_gap = EXCLUDED.brim_object_gap,
+                    skirt_loops = EXCLUDED.skirt_loops,
+                    skirt_distance = EXCLUDED.skirt_distance,
+                    skirt_height = EXCLUDED.skirt_height,
                     enable_prime_tower = EXCLUDED.enable_prime_tower,
                     prime_volume = EXCLUDED.prime_volume,
                     prime_tower_width = EXCLUDED.prime_tower_width,
@@ -393,6 +595,7 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                     nozzle_temp = EXCLUDED.nozzle_temp,
                     bed_temp = EXCLUDED.bed_temp,
                     bed_type = EXCLUDED.bed_type,
+                    setting_modes = EXCLUDED.setting_modes,
                     updated_at = NOW()
                 """,
                 1,
@@ -401,6 +604,14 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                 d.wall_count,
                 d.infill_pattern,
                 d.supports,
+                d.support_type,
+                d.support_threshold_angle,
+                d.brim_type,
+                d.brim_width,
+                d.brim_object_gap,
+                d.skirt_loops,
+                d.skirt_distance,
+                d.skirt_height,
                 d.enable_prime_tower,
                 d.prime_volume,
                 d.prime_tower_width,
@@ -410,9 +621,36 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                 d.nozzle_temp,
                 d.bed_temp,
                 d.bed_type,
+                setting_modes_json,
             )
 
     return {"message": "Extruder presets updated"}
+
+
+@app.get("/presets/orca-defaults")
+def get_orca_defaults():
+    """Return Orca process profile defaults for UI display."""
+    from pathlib import Path
+    profile_path = Path(__file__).parent / "orca_profiles" / "process" / "0.20mm Standard @Snapmaker U1.json"
+    try:
+        with open(profile_path) as f:
+            profile = json.load(f)
+    except Exception:
+        return {}
+    return {
+        "layer_height": float(profile.get("layer_height", "0.2")),
+        "infill_density": int(str(profile.get("sparse_infill_density", "15")).rstrip("%")),
+        "wall_count": int(profile.get("wall_loops", "2")),
+        "infill_pattern": profile.get("sparse_infill_pattern", "grid"),
+        "supports": bool(int(profile.get("enable_support", "0"))),
+        "support_type": profile.get("support_type"),
+        "brim_type": profile.get("brim_type", "auto_brim"),
+        "brim_width": float(profile.get("brim_width", "5")),
+        "skirt_loops": int(profile.get("skirt_loops", "2")),
+        "skirt_distance": float(profile.get("skirt_distance", "3")),
+        "skirt_height": int(profile.get("skirt_height", "1")),
+        "enable_prime_tower": bool(int(profile.get("enable_prime_tower", "0"))),
+    }
 
 
 @app.post("/filaments")
@@ -430,8 +668,8 @@ async def create_filament(filament: FilamentCreate):
             try:
                 result = await conn.fetchrow(
                     """
-                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type, density)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     RETURNING id
                     """,
                     filament.name,
@@ -444,6 +682,7 @@ async def create_filament(filament: FilamentCreate):
                     filament.extruder_index,
                     filament.is_default,
                     filament.source_type,
+                    filament.density,
                 )
             except Exception as e:
                 if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
@@ -482,8 +721,9 @@ async def update_filament(filament_id: int, filament: FilamentUpdate):
                         color_hex = $7,
                         extruder_index = $8,
                         is_default = $9,
-                        source_type = $10
-                    WHERE id = $11
+                        source_type = $10,
+                        density = $11
+                    WHERE id = $12
                     """,
                     filament.name,
                     filament.material,
@@ -495,6 +735,7 @@ async def update_filament(filament_id: int, filament: FilamentUpdate):
                     filament.extruder_index,
                     filament.is_default,
                     filament.source_type,
+                    filament.density,
                     filament_id,
                 )
             except Exception as e:
@@ -685,6 +926,7 @@ def _parse_filament_profile_payload(file_name: str, payload: dict) -> dict:
         "print_speed": print_speed,
         "bed_type": str(_extract_profile_value(root, ["bed_type", "build_plate_type"], "PEI")).strip() or "PEI",
         "color_hex": _normalize_color_hex(_extract_profile_value(root, ["color_hex", "color", "filament_colour"], "#FFFFFF")),
+        "density": _clamp(float(_extract_profile_value(root, ["filament_density", "density"], "1.24") or "1.24"), 0.5, 5.0),
         "slicer_settings": slicer_settings if slicer_settings else None,
         "is_recognized": is_orca_profile or matched_keys > 0,
     }
@@ -737,9 +979,9 @@ async def import_filament_profile(file: UploadFile = File(...), rename_on_confli
             """
             INSERT INTO filaments (
                 name, material, nozzle_temp, bed_temp, print_speed,
-                bed_type, color_hex, extruder_index, is_default, source_type, slicer_settings
+                bed_type, color_hex, extruder_index, is_default, source_type, slicer_settings, density
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, FALSE, 'custom', $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, FALSE, 'custom', $8, $9)
             RETURNING id
             """,
             profile_name,
@@ -750,6 +992,7 @@ async def import_filament_profile(file: UploadFile = File(...), rename_on_confli
             parsed["bed_type"],
             parsed["color_hex"],
             slicer_json,
+            parsed["density"],
         )
 
     return {
@@ -796,6 +1039,7 @@ async def preview_filament_profile_import(file: UploadFile = File(...)):
             "print_speed": parsed["print_speed"],
             "bed_type": parsed["bed_type"],
             "color_hex": parsed["color_hex"],
+            "density": parsed["density"],
             "has_slicer_settings": bool(parsed["slicer_settings"]),
             "slicer_setting_count": len(parsed["slicer_settings"]) if parsed["slicer_settings"] else 0,
             "is_recognized": parsed["is_recognized"],
@@ -814,7 +1058,7 @@ async def export_filament_profile(filament_id: int):
     async with pool.acquire() as conn:
         await _ensure_filament_schema(conn)
         row = await conn.fetchrow(
-            "SELECT name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, slicer_settings FROM filaments WHERE id = $1",
+            "SELECT name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, slicer_settings, density FROM filaments WHERE id = $1",
             filament_id,
         )
         if not row:
@@ -830,6 +1074,7 @@ async def export_filament_profile(filament_id: int):
         "nozzle_temperature": [str(row["nozzle_temp"])],
         "bed_temperature": [str(row["bed_temp"])],
         "filament_colour": [row["color_hex"] or "#FFFFFF"],
+        "filament_density": [str(row["density"] or 1.24)],
     }
 
     # Merge stored slicer-native settings if present

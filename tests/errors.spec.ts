@@ -85,34 +85,51 @@ test.describe('Error Handling & Edge Cases', () => {
 
   test.describe('Filament Delete Safety', () => {
     test('delete filament assigned to extruder preset returns 400', async ({ request }) => {
-      // Get current presets to find an assigned filament
+      // Snapshot presets so we can always restore them
       const presetsRes = await request.get(`${API}/presets/extruders`);
-      const presets = await presetsRes.json();
+      const originalPresets = await presetsRes.json();
 
-      // Find a slot with a filament assigned
-      const assignedSlot = presets.extruders?.find((e: any) => e.filament_id);
-      if (!assignedSlot) {
-        // No preset assigned — create one first
-        const fil = await getDefaultFilament(request);
-        if (!fil) return; // No filaments at all, skip
+      try {
+        // Find a slot with a filament assigned
+        const assignedSlot = originalPresets.extruders?.find((e: any) => e.filament_id);
+        if (!assignedSlot) {
+          // No preset assigned — temporarily assign one.
+          // API requires exactly 4 extruder slots, so send all 4.
+          const fil = await getDefaultFilament(request);
+          if (!fil) return; // No filaments at all, skip
+          const extruders = originalPresets.extruders.map((e: any, i: number) => ({
+            slot: e.slot || i + 1,
+            filament_id: i === 0 ? fil.id : (e.filament_id || null),
+            color_hex: e.color_hex || '#FFFFFF',
+          }));
+          const putRes = await request.put(`${API}/presets/extruders`, {
+            data: {
+              extruders,
+              slicing_defaults: originalPresets.slicing_defaults,
+            },
+          });
+          expect(putRes.ok()).toBe(true);
+
+          // Now try to delete that filament — should be blocked
+          const delRes = await request.delete(`${API}/filaments/${fil.id}`);
+          expect(delRes.status()).toBe(400);
+          const body = await delRes.json();
+          expect(body.detail).toContain('preset');
+        } else {
+          // Try to delete the assigned filament — should be blocked
+          const delRes = await request.delete(`${API}/filaments/${assignedSlot.filament_id}`);
+          expect(delRes.status()).toBe(400);
+          const body = await delRes.json();
+          expect(body.detail).toContain('preset');
+        }
+      } finally {
+        // Always restore original presets
         await request.put(`${API}/presets/extruders`, {
           data: {
-            extruders: [{ slot: 1, filament_id: fil.id, color_hex: '#FFFFFF' }],
-            slicing_defaults: presets.slicing_defaults,
+            extruders: originalPresets.extruders,
+            slicing_defaults: originalPresets.slicing_defaults,
           },
         });
-
-        // Now try to delete that filament
-        const delRes = await request.delete(`${API}/filaments/${fil.id}`);
-        expect(delRes.status()).toBe(400);
-        const body = await delRes.json();
-        expect(body.detail).toContain('preset');
-      } else {
-        // Try to delete the assigned filament
-        const delRes = await request.delete(`${API}/filaments/${assignedSlot.filament_id}`);
-        expect(delRes.status()).toBe(400);
-        const body = await delRes.json();
-        expect(body.detail).toContain('preset');
       }
     });
 

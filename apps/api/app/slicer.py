@@ -225,6 +225,7 @@ class OrcaSlicer:
         return {
             "estimated_time_seconds": metadata.estimated_time_seconds,
             "filament_used_mm": metadata.filament_used_mm,
+            "filament_used_g": metadata.filament_used_g,
             "layer_count": metadata.layer_count,
             "bounds": {
                 "max_x": metadata.max_x,

@@ -13,13 +13,15 @@ test.describe('Upload Workflow', () => {
     await expect(page.getByRole('heading', { name: 'Configure Print Settings' })).toBeVisible();
   });
 
-  test('uploaded file appears in recent uploads', async ({ page }) => {
+  test('uploaded file appears in My Files modal', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     // Go back to upload step
     await page.getByRole('button', { name: 'Back to Upload' }).click();
-    await expect(page.getByRole('heading', { name: 'Recent Uploads' })).toBeVisible();
-    // Use .first() since many uploads may share the same filename
-    await expect(page.getByText('calib-cube-10-dual-colour-merged.3mf').first()).toBeVisible();
+    // Open My Files modal and scope searches within it
+    await page.getByTitle('My Files').click();
+    const modal = page.locator('[x-show="showStorageDrawer"]');
+    await expect(modal.getByRole('heading', { name: 'My Files' })).toBeVisible();
+    await expect(modal.getByText('calib-cube-10-dual-colour-merged.3mf').first()).toBeVisible();
   });
 
   test('configure step shows filament selection', async ({ page }) => {
@@ -41,14 +43,38 @@ test.describe('Upload Workflow', () => {
     expect(step).toBe('upload');
   });
 
-  test('selecting an existing upload goes to configure', async ({ page }) => {
+  test('customize mode preserves detected colors (not all white)', async ({ page }) => {
+    await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
+
+    // File has 2 detected colors — verify they are loaded
+    const detectedColors = await getAppState(page, 'detectedColors') as string[];
+    expect(detectedColors?.length).toBeGreaterThan(0);
+
+    // Expand the Colours & Filaments accordion
+    await page.getByText('Colours & Filaments').click();
+    // Click Customise button to toggle filament override mode
+    await page.getByRole('button', { name: 'Customise' }).click();
+
+    // filament_colors in sliceSettings should not be all #FFFFFF
+    const sliceSettings = await getAppState(page, 'sliceSettings') as any;
+    const colors = sliceSettings?.filament_colors || [];
+    expect(colors.length).toBeGreaterThan(0);
+    const hasNonWhite = colors.some(
+      (c: string) => c.toUpperCase() !== '#FFFFFF'
+    );
+    expect(hasNonWhite).toBe(true);
+  });
+
+  test('selecting an existing upload from My Files goes to configure', async ({ page }) => {
     // First ensure there's at least one upload
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     await page.getByRole('button', { name: 'Back to Upload' }).click();
 
-    // Now click on the upload in the list
-    const uploadRow = page.getByText('calib-cube-10-dual-colour-merged.3mf').first();
-    await uploadRow.click();
+    // Open My Files modal and click Slice on the first upload
+    await page.getByTitle('My Files').click();
+    const modal = page.locator('[x-show="showStorageDrawer"]');
+    await expect(modal.getByRole('heading', { name: 'My Files' })).toBeVisible();
+    await modal.getByRole('button', { name: 'Slice' }).first().click();
     await page.waitForTimeout(1_000);
     const step = await getAppState(page, 'currentStep');
     expect(step).toBe('configure');

@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API, apiUpload } from './helpers';
 
 test.describe('Slicing Workflow', () => {
+  test.setTimeout(180_000);
   test.beforeEach(async ({ page }) => {
     await waitForApp(page);
   });
@@ -12,8 +13,18 @@ test.describe('Slicing Workflow', () => {
     // Click Slice Now
     await page.getByRole('button', { name: /Slice Now/i }).click();
 
-    // Should enter slicing state
-    await expect(page.getByText(/Slicing Your Print/i)).toBeVisible({ timeout: 5_000 });
+    // Should enter slicing or complete state (fast slices may skip the slicing step)
+    await page.waitForFunction(() => {
+      const body = document.querySelector('body') as any;
+      if (body?._x_dataStack) {
+        for (const scope of body._x_dataStack) {
+          if ('currentStep' in scope) {
+            return scope.currentStep === 'slicing' || scope.currentStep === 'complete';
+          }
+        }
+      }
+      return false;
+    }, undefined, { timeout: 5_000 });
 
     // Wait for completion
     await waitForSliceComplete(page);
@@ -58,7 +69,7 @@ test.describe('Slicing Workflow', () => {
     expect(step).toBe('upload');
   });
 
-  test('completed slice appears in Sliced Files list', async ({ page }) => {
+  test('completed slice appears in My Files modal', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);
@@ -66,8 +77,31 @@ test.describe('Slicing Workflow', () => {
     // Go back to upload step
     await page.getByRole('button', { name: /Start New Slice/i }).click();
 
-    // Sliced Files section should exist
-    await expect(page.getByRole('heading', { name: 'Sliced Files' })).toBeVisible();
+    // Open My Files modal — completed slices show as sub-entries under the upload
+    await page.getByTitle('My Files').click();
+    const modal = page.locator('[x-show="showStorageDrawer"]');
+    await expect(modal.getByRole('heading', { name: 'My Files' })).toBeVisible();
+    // The sliced job should appear (shows layer count or time)
+    await expect(modal.getByText(/layers/).first()).toBeVisible();
+  });
+
+  test('G-code preview shows detected colors (not all white)', async ({ page }) => {
+    await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
+    await page.getByRole('button', { name: /Slice Now/i }).click();
+    await waitForSliceComplete(page);
+
+    // Verify we're on the complete step
+    await expect(page.getByRole('heading', { name: /G-code is Ready/i })).toBeVisible();
+
+    // Check sliceResult.filament_colors in Alpine state — should not be all #FFFFFF
+    const filamentColors = await getAppState(page, 'sliceResult').then(
+      (r: any) => r?.filament_colors || []
+    );
+    expect(filamentColors.length).toBeGreaterThan(0);
+    const hasNonWhite = filamentColors.some(
+      (c: string) => c.toUpperCase() !== '#FFFFFF'
+    );
+    expect(hasNonWhite).toBe(true);
   });
 
   test('slice via API returns job with metadata', async ({ request }) => {

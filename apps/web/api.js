@@ -136,6 +136,9 @@ class ApiClient {
             brim_type: settings.brim_type || null,
             brim_width: settings.brim_width ?? null,
             brim_object_gap: settings.brim_object_gap ?? null,
+            skirt_loops: settings.skirt_loops ?? null,
+            skirt_distance: settings.skirt_distance ?? null,
+            skirt_height: settings.skirt_height ?? null,
             enable_prime_tower: settings.enable_prime_tower,
             prime_volume: settings.prime_volume,
             prime_tower_width: settings.prime_tower_width,
@@ -145,17 +148,17 @@ class ApiClient {
             nozzle_temp: settings.nozzle_temp,
             bed_temp: settings.bed_temp,
             bed_type: settings.bed_type,
-            filament_colors: settings.filament_colors,  // Allow color override per extruder
+            filament_colors: settings.filament_colors,
             extruder_assignments: settings.extruder_assignments
         };
-        
+
         // Support both single filament_id and filament_ids array
         if (settings.filament_ids && settings.filament_ids.length > 0) {
             payload.filament_ids = settings.filament_ids;
         } else if (settings.filament_id) {
             payload.filament_id = settings.filament_id;
         }
-        
+
         return this.fetch(`/uploads/${uploadId}/slice`, {
             method: 'POST',
             body: JSON.stringify(payload),
@@ -191,6 +194,9 @@ class ApiClient {
             brim_type: settings.brim_type || null,
             brim_width: settings.brim_width ?? null,
             brim_object_gap: settings.brim_object_gap ?? null,
+            skirt_loops: settings.skirt_loops ?? null,
+            skirt_distance: settings.skirt_distance ?? null,
+            skirt_height: settings.skirt_height ?? null,
             enable_prime_tower: settings.enable_prime_tower,
             prime_volume: settings.prime_volume,
             prime_tower_width: settings.prime_tower_width,
@@ -203,14 +209,14 @@ class ApiClient {
             filament_colors: settings.filament_colors,
             extruder_assignments: settings.extruder_assignments
         };
-        
+
         // Support both single filament_id and filament_ids array
         if (settings.filament_ids && settings.filament_ids.length > 0) {
             payload.filament_ids = settings.filament_ids;
         } else if (settings.filament_id) {
             payload.filament_id = settings.filament_id;
         }
-        
+
         return this.fetch(`/uploads/${uploadId}/slice-plate`, {
             method: 'POST',
             body: JSON.stringify(payload),
@@ -343,6 +349,13 @@ class ApiClient {
     }
 
     /**
+     * Get Orca process profile defaults for UI hints
+     */
+    async getOrcaDefaults() {
+        return this.fetch('/presets/orca-defaults');
+    }
+
+    /**
      * Save extruder presets + default slicing settings
      */
     async saveExtruderPresets(payload) {
@@ -423,6 +436,44 @@ class ApiClient {
         return this.fetch(`/jobs/${jobId}`, {
             method: 'DELETE',
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Printer Settings & Print Control
+    // -----------------------------------------------------------------------
+
+    async getPrinterSettings() {
+        return this.fetch('/printer/settings');
+    }
+
+    async savePrinterSettings(data) {
+        return this.fetch('/printer/settings', {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        });
+    }
+
+    async sendToPrinter(jobId) {
+        return this.fetch('/printer/print', {
+            method: 'POST',
+            body: JSON.stringify({ job_id: jobId }),
+        });
+    }
+
+    async getPrintStatus() {
+        return this.fetch('/printer/print/status');
+    }
+
+    async pausePrint() {
+        return this.fetch('/printer/pause', { method: 'POST' });
+    }
+
+    async resumePrint() {
+        return this.fetch('/printer/resume', { method: 'POST' });
+    }
+
+    async cancelPrint() {
+        return this.fetch('/printer/cancel', { method: 'POST' });
     }
 }
 

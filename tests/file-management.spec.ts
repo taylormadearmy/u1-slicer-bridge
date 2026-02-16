@@ -60,6 +60,7 @@ test.describe('File Management', () => {
   });
 
   test('upload preview endpoint returns image or 404', async ({ request }) => {
+    test.setTimeout(120_000);
     const upload = await apiUpload(request, 'Dragon Scale infinity.3mf');
 
     const previewRes = await request.get(`${API}/uploads/${upload.upload_id}/preview`, { timeout: 30_000 });

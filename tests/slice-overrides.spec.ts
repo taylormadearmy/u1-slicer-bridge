@@ -151,27 +151,29 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
     const getRes = await request.get(`${API}/presets/extruders`, { timeout: 30_000 });
     const presets = await getRes.json();
 
-    // Save with prime tower settings
-    const updated = {
-      ...presets,
-      slicing_defaults: {
-        ...presets.slicing_defaults,
-        enable_prime_tower: true,
-        prime_tower_width: 50,
-        prime_tower_brim_width: 4,
-      },
-    };
-    const saveRes = await request.put(`${API}/presets/extruders`, { data: updated, timeout: 30_000 });
-    expect(saveRes.ok()).toBe(true);
+    try {
+      // Save with prime tower settings
+      const updated = {
+        ...presets,
+        slicing_defaults: {
+          ...presets.slicing_defaults,
+          enable_prime_tower: true,
+          prime_tower_width: 50,
+          prime_tower_brim_width: 4,
+        },
+      };
+      const saveRes = await request.put(`${API}/presets/extruders`, { data: updated, timeout: 30_000 });
+      expect(saveRes.ok()).toBe(true);
 
-    // Read back
-    const getRes2 = await request.get(`${API}/presets/extruders`, { timeout: 30_000 });
-    const presets2 = await getRes2.json();
-    expect(presets2.slicing_defaults.enable_prime_tower).toBe(true);
-    expect(presets2.slicing_defaults.prime_tower_width).toBe(50);
-    expect(presets2.slicing_defaults.prime_tower_brim_width).toBe(4);
-
-    // Restore original
-    await request.put(`${API}/presets/extruders`, { data: presets, timeout: 30_000 });
+      // Read back
+      const getRes2 = await request.get(`${API}/presets/extruders`, { timeout: 30_000 });
+      const presets2 = await getRes2.json();
+      expect(presets2.slicing_defaults.enable_prime_tower).toBe(true);
+      expect(presets2.slicing_defaults.prime_tower_width).toBe(50);
+      expect(presets2.slicing_defaults.prime_tower_brim_width).toBe(4);
+    } finally {
+      // Always restore original presets
+      await request.put(`${API}/presets/extruders`, { data: presets, timeout: 30_000 });
+    }
   });
 });

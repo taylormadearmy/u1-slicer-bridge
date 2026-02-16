@@ -1,8 +1,8 @@
 """G-code metadata extraction from Orca Slicer output."""
 
 from pathlib import Path
-from typing import Dict, Optional
-from dataclasses import dataclass
+from typing import Dict, List, Optional
+from dataclasses import dataclass, field
 import re
 
 
@@ -17,6 +17,7 @@ class GCodeMetadata:
     max_x: float
     max_y: float
     max_z: float
+    filament_used_g: List[float] = field(default_factory=list)
 
 
 def parse_time_to_seconds(time_str: str) -> int:
@@ -54,6 +55,7 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
     """
     estimated_time_seconds = 0
     filament_used_mm = 0.0
+    filament_used_g: List[float] = []
     layer_count = None
 
     def parse_time_from_line(line: str) -> Optional[int]:
@@ -111,10 +113,19 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
                 estimated_time_seconds = max(estimated_time_seconds, parsed_time)
 
             # Extract filament usage (specifically [mm] units)
+            # May be comma-separated for multicolour: ; filament used [mm] = 278.64, 284.92
             elif 'filament used' in line.lower() and '[mm]' in line.lower():
-                filament_match = re.search(r'=\s*([\d.]+)', line)
-                if filament_match:
-                    filament_used_mm = float(filament_match.group(1))
+                mm_match = re.search(r'=\s*(.+)$', line)
+                if mm_match:
+                    values = [float(v.strip()) for v in mm_match.group(1).split(',') if v.strip()]
+                    filament_used_mm = sum(values)
+
+            # Extract per-filament weight in grams
+            # Example: ; filament used [g] = 0.83, 0.85
+            elif 'filament used' in line.lower() and '[g]' in line.lower():
+                g_match = re.search(r'=\s*(.+)$', line)
+                if g_match:
+                    filament_used_g = [float(v.strip()) for v in g_match.group(1).split(',') if v.strip()]
 
     # Extract movement bounds
     bounds = extract_movement_bounds(gcode_path)
@@ -123,6 +134,7 @@ def parse_orca_metadata(gcode_path: Path) -> GCodeMetadata:
         estimated_time_seconds=estimated_time_seconds,
         filament_used_mm=filament_used_mm,
         layer_count=layer_count,
+        filament_used_g=filament_used_g,
         min_x=bounds['min_x'],
         min_y=bounds['min_y'],
         min_z=bounds['min_z'],

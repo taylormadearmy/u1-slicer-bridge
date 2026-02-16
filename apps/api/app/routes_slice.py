@@ -127,6 +127,9 @@ class SliceRequest(BaseModel):
     brim_type: Optional[str] = None  # "auto_brim", "outer_only", "no_brim", etc.
     brim_width: Optional[float] = Field(None, ge=0, le=50)
     brim_object_gap: Optional[float] = Field(None, ge=0, le=5)
+    skirt_loops: Optional[int] = Field(None, ge=0, le=20)
+    skirt_distance: Optional[float] = Field(None, ge=0, le=50)
+    skirt_height: Optional[int] = Field(None, ge=0, le=20)
     enable_prime_tower: Optional[bool] = False
     prime_volume: Optional[int] = Field(None, ge=1, le=500)
     prime_tower_width: Optional[int] = Field(None, ge=10, le=100)
@@ -154,6 +157,9 @@ class SlicePlateRequest(BaseModel):
     brim_type: Optional[str] = None
     brim_width: Optional[float] = Field(None, ge=0, le=50)
     brim_object_gap: Optional[float] = Field(None, ge=0, le=5)
+    skirt_loops: Optional[int] = Field(None, ge=0, le=20)
+    skirt_distance: Optional[float] = Field(None, ge=0, le=50)
+    skirt_height: Optional[int] = Field(None, ge=0, le=20)
     enable_prime_tower: Optional[bool] = False
     prime_volume: Optional[int] = Field(None, ge=1, le=500)
     prime_tower_width: Optional[int] = Field(None, ge=10, le=100)
@@ -495,6 +501,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["brim_width"] = str(request.brim_width)
         if request.brim_object_gap is not None:
             overrides["brim_object_gap"] = str(request.brim_object_gap)
+        if request.skirt_loops is not None:
+            overrides["skirt_loops"] = str(request.skirt_loops)
+        if request.skirt_distance is not None:
+            overrides["skirt_distance"] = str(request.skirt_distance)
+        if request.skirt_height is not None:
+            overrides["skirt_height"] = str(request.skirt_height)
         if request.enable_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
@@ -637,13 +649,18 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         job_logger.info(f"Slicing job {job_id} completed successfully")
 
         # Determine display colors: override > detected > filament defaults
-        if request.filament_colors:
+        # Treat all-#FFFFFF as no override (default filament profiles are white)
+        has_real_override = (
+            request.filament_colors
+            and any(c.upper() != '#FFFFFF' for c in request.filament_colors)
+        )
+        if has_real_override:
             display_colors = request.filament_colors
         elif detected_colors:
             display_colors = detected_colors
         else:
             display_colors = json.loads(filament_colors_json)
-        
+
         return {
             "job_id": job_id,
             "status": "completed",
@@ -655,6 +672,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             "metadata": {
                 "estimated_time_seconds": metadata['estimated_time_seconds'],
                 "filament_used_mm": metadata['filament_used_mm'],
+                "filament_used_g": metadata.get('filament_used_g', []),
                 "layer_count": metadata.get('layer_count'),
                 "bounds": metadata['bounds']
             }
@@ -997,6 +1015,12 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["brim_width"] = str(request.brim_width)
         if request.brim_object_gap is not None:
             overrides["brim_object_gap"] = str(request.brim_object_gap)
+        if request.skirt_loops is not None:
+            overrides["skirt_loops"] = str(request.skirt_loops)
+        if request.skirt_distance is not None:
+            overrides["skirt_distance"] = str(request.skirt_distance)
+        if request.skirt_height is not None:
+            overrides["skirt_height"] = str(request.skirt_height)
         if request.enable_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
@@ -1134,13 +1158,18 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         job_logger.info(f"Plate slicing job {job_id} completed successfully")
 
         # Determine display colors: override > detected > filament defaults
-        if request.filament_colors:
+        # Treat all-#FFFFFF as no override (default filament profiles are white)
+        has_real_override = (
+            request.filament_colors
+            and any(c.upper() != '#FFFFFF' for c in request.filament_colors)
+        )
+        if has_real_override:
             display_colors = request.filament_colors
         elif detected_colors:
             display_colors = detected_colors
         else:
             display_colors = json.loads(filament_colors_json)
-        
+
         return {
             "job_id": job_id,
             "status": "completed",
@@ -1154,6 +1183,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             "metadata": {
                 "estimated_time_seconds": metadata['estimated_time_seconds'],
                 "filament_used_mm": metadata['filament_used_mm'],
+                "filament_used_g": metadata.get('filament_used_g', []),
                 "layer_count": metadata.get('layer_count'),
                 "bounds": metadata['bounds']
             }
@@ -1290,7 +1320,7 @@ async def get_upload_plates(upload_id: int):
                 validation = validator.validate_3mf_bounds(source_3mf, plate.plate_id)
 
                 plate_dict = plate.to_dict()
-                plate_colors = colors_per_plate.get(plate.plate_id, global_colors)
+                plate_colors = colors_per_plate.get(plate.plate_id, global_colors[:1])
                 plate_dict.update({
                     "detected_colors": plate_colors,
                     "preview_url": (
@@ -1309,7 +1339,7 @@ async def get_upload_plates(upload_id: int):
             except Exception as e:
                 logger.error(f"Failed to validate plate {plate.plate_id}: {str(e)}")
                 plate_dict = plate.to_dict()
-                plate_colors = colors_per_plate.get(plate.plate_id, global_colors)
+                plate_colors = colors_per_plate.get(plate.plate_id, global_colors[:1])
                 plate_dict.update({
                     "detected_colors": plate_colors,
                     "preview_url": (
@@ -1427,11 +1457,13 @@ async def get_slicing_job(job_id: str):
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
             """
-            SELECT job_id, upload_id, status, started_at, completed_at,
-                   gcode_path, gcode_size, estimated_time_seconds, filament_used_mm,
-                   layer_count, filament_colors, error_message
-            FROM slicing_jobs
-            WHERE job_id = $1
+            SELECT j.job_id, j.upload_id, j.status, j.started_at, j.completed_at,
+                   j.gcode_path, j.gcode_size, j.estimated_time_seconds, j.filament_used_mm,
+                   j.layer_count, j.filament_colors, j.error_message,
+                   u.detected_colors AS upload_detected_colors
+            FROM slicing_jobs j
+            LEFT JOIN uploads u ON u.id = j.upload_id
+            WHERE j.job_id = $1
             """,
             job_id
         )
@@ -1446,6 +1478,13 @@ async def get_slicing_job(job_id: str):
         except (json.JSONDecodeError, ValueError):
             pass
 
+    detected_colors = []
+    if job["upload_detected_colors"]:
+        try:
+            detected_colors = json.loads(job["upload_detected_colors"])
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     result = {
         "job_id": job["job_id"],
         "upload_id": job["upload_id"],
@@ -1456,6 +1495,7 @@ async def get_slicing_job(job_id: str):
         "gcode_size": job["gcode_size"],
         "gcode_size_mb": round(job["gcode_size"] / 1024 / 1024, 2) if job["gcode_size"] else None,
         "filament_colors": filament_colors,
+        "detected_colors": detected_colors,
         "error_message": job["error_message"]
     }
 
@@ -1495,6 +1535,46 @@ async def download_gcode(job_id: str):
             media_type="text/plain",
             filename=f"{job_id}.gcode"
         )
+
+
+@router.get("/jobs/{job_id}/download-3mf")
+async def download_embedded_3mf(job_id: str):
+    """Download the profile-embedded 3MF used for slicing."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT sj.three_mf_path, sj.status, u.filename
+            FROM slicing_jobs sj
+            JOIN uploads u ON sj.upload_id = u.id
+            WHERE sj.job_id = $1
+            """,
+            job_id,
+        )
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        if row["status"] != "completed":
+            raise HTTPException(status_code=400, detail="Job not completed")
+
+        if not row["three_mf_path"]:
+            raise HTTPException(status_code=404, detail="Embedded 3MF not available for this job")
+
+        three_mf_path = Path(row["three_mf_path"])
+        if not three_mf_path.exists():
+            raise HTTPException(status_code=404, detail="Embedded 3MF file not found on disk (cache may have been cleared)")
+
+    # Build download filename: original stem + _sliced.3mf
+    original = row["filename"] or "model.3mf"
+    stem = original.rsplit(".", 1)[0] if "." in original else original
+    download_name = f"{stem}_sliced.3mf"
+
+    return FileResponse(
+        path=three_mf_path,
+        media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+        filename=download_name,
+    )
 
 
 @router.get("/jobs/{job_id}/gcode/metadata")

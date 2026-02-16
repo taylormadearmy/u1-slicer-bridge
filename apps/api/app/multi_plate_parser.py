@@ -7,8 +7,6 @@ transform matrix positioning.
 
 import zipfile
 import xml.etree.ElementTree as ET
-import trimesh
-import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import logging
@@ -324,237 +322,204 @@ def extract_plate_objects(file_path: Path, target_plate_id: int) -> List[Dict[st
     return objects_info
 
 
-def get_plate_bounds(file_path: Path, plate_id: Optional[int] = None) -> Dict[str, Any]:
+def _scan_vertex_bounds_from_element(mesh_elem, ns: Dict[str, str]) -> Optional[Tuple[List[float], List[float]]]:
+    """Scan vertex elements to find min/max XYZ without building full mesh.
+
+    Returns (min_xyz, max_xyz) or None if no vertices found.
     """
-    Calculate bounds for a specific plate or all plates combined.
-    
+    vertices_elem = mesh_elem.find("m:vertices", ns)
+    if vertices_elem is None:
+        return None
+
+    min_x = min_y = min_z = float('inf')
+    max_x = max_y = max_z = float('-inf')
+    count = 0
+
+    for vertex in vertices_elem.iter(f"{{{ns['m']}}}vertex"):
+        x = float(vertex.get("x"))
+        y = float(vertex.get("y"))
+        z = float(vertex.get("z"))
+        if x < min_x: min_x = x
+        if x > max_x: max_x = x
+        if y < min_y: min_y = y
+        if y > max_y: max_y = y
+        if z < min_z: min_z = z
+        if z > max_z: max_z = z
+        count += 1
+
+    if count == 0:
+        return None
+
+    return [min_x, min_y, min_z], [max_x, max_y, max_z]
+
+
+def _scan_object_bounds(zf: zipfile.ZipFile, obj_elem, ns: Dict[str, str]) -> Optional[Tuple[List[float], List[float]]]:
+    """Get bounds for a single object (inline mesh or component references).
+
+    Returns (min_xyz, max_xyz) or None.
+    """
+    # Inline mesh
+    mesh = obj_elem.find("m:mesh", ns)
+    if mesh is not None:
+        return _scan_vertex_bounds_from_element(mesh, ns)
+
+    # Component references (external files)
+    components = obj_elem.find("m:components", ns)
+    if components is None:
+        return None
+
+    p_ns = ns["p"]
+    combined_min = [float('inf')] * 3
+    combined_max = [float('-inf')] * 3
+    found = False
+
+    for component in components.findall("m:component", ns):
+        ref_path = component.get(f"{{{p_ns}}}path")
+        ref_object_id = component.get("objectid")
+        if not ref_path or not ref_object_id:
+            continue
+
+        try:
+            ref_xml = zf.read(ref_path.lstrip("/"))
+            ref_root = ET.fromstring(ref_xml)
+            ref_resources = ref_root.find("m:resources", ns)
+            if ref_resources is None:
+                continue
+            for ref_obj in ref_resources.findall("m:object", ns):
+                if ref_obj.get("id") == ref_object_id:
+                    ref_mesh = ref_obj.find("m:mesh", ns)
+                    if ref_mesh is not None:
+                        result = _scan_vertex_bounds_from_element(ref_mesh, ns)
+                        if result:
+                            bmin, bmax = result
+                            for i in range(3):
+                                if bmin[i] < combined_min[i]: combined_min[i] = bmin[i]
+                                if bmax[i] > combined_max[i]: combined_max[i] = bmax[i]
+                            found = True
+                    break
+        except (KeyError, ET.ParseError):
+            continue
+
+    return (combined_min, combined_max) if found else None
+
+
+def _calculate_xml_bounds(file_path: Path,
+                          plates: Optional[List[PlateInfo]] = None,
+                          plate_id: Optional[int] = None) -> Dict[str, Any]:
+    """Calculate bounds from XML vertex data without trimesh.
+
+    Opens the ZIP once and scans vertex coordinates directly.
+    """
+    if plates is None:
+        plates_parsed, is_multi_plate = parse_multi_plate_3mf(file_path)
+    else:
+        plates_parsed = plates
+        is_multi_plate = len(plates_parsed) > 1
+
+    ns = {
+        "m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
+        "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    }
+
+    with zipfile.ZipFile(file_path, "r") as zf:
+        model_xml = zf.read("3D/3dmodel.model")
+        root = ET.fromstring(model_xml)
+
+        resources = root.find("m:resources", ns)
+        if resources is None:
+            raise ValueError("3MF missing resources section")
+
+        # Build object_id -> element map
+        obj_map: Dict[str, Any] = {}
+        for obj in resources.findall("m:object", ns):
+            oid = obj.get("id")
+            if oid:
+                obj_map[oid] = obj
+
+        build = root.find("m:build", ns)
+        items = build.findall("m:item", ns) if build is not None else []
+
+        # Determine which items to scan
+        if plate_id is not None:
+            # Single plate
+            if plate_id < 1 or plate_id > len(items):
+                raise ValueError(f"Plate {plate_id} not found (file has {len(items)} items)")
+            target_items = [(plate_id - 1, items[plate_id - 1])]
+        else:
+            # All items
+            target_items = list(enumerate(items))
+
+        global_min = [float('inf')] * 3
+        global_max = [float('-inf')] * 3
+        found = False
+
+        for idx, item in target_items:
+            obj_id = item.get("objectid")
+            if not obj_id or obj_id not in obj_map:
+                continue
+
+            bounds = _scan_object_bounds(zf, obj_map[obj_id], ns)
+            if bounds is None:
+                continue
+
+            bmin, bmax = bounds
+
+            # Apply item transform (translation component)
+            transform_str = item.get("transform", "1 0 0 0 1 0 0 0 1 0 0 0")
+            transform_values = [float(x) for x in transform_str.split()]
+            if len(transform_values) >= 12:
+                tx, ty, tz = transform_values[9], transform_values[10], transform_values[11]
+            else:
+                tx = ty = tz = 0.0
+
+            for i, (lo, hi, t) in enumerate(zip(bmin, bmax, [tx, ty, tz])):
+                val_min = lo + t
+                val_max = hi + t
+                if val_min < global_min[i]: global_min[i] = val_min
+                if val_max > global_max[i]: global_max[i] = val_max
+            found = True
+
+    if not found:
+        global_min = [0.0, 0.0, 0.0]
+        global_max = [0.0, 0.0, 0.0]
+
+    size = [global_max[i] - global_min[i] for i in range(3)]
+
+    result: Dict[str, Any] = {
+        "is_multi_plate": is_multi_plate,
+        "bounds": {
+            "min": global_min,
+            "max": global_max,
+            "size": size
+        }
+    }
+
+    if plate_id is not None:
+        target_plate = next((p for p in plates_parsed if p.plate_id == plate_id), None)
+        result["plates"] = [target_plate.to_dict()] if target_plate else []
+        result["plate_id"] = plate_id
+    else:
+        result["plates"] = [p.to_dict() for p in plates_parsed] if is_multi_plate else []
+
+    return result
+
+
+def get_plate_bounds(file_path: Path,
+                     plate_id: Optional[int] = None,
+                     plates: Optional[List[PlateInfo]] = None) -> Dict[str, Any]:
+    """Calculate bounds for a specific plate or all plates combined.
+
+    Uses fast XML vertex scanning — no trimesh required.
+
     Args:
         file_path: Path to .3mf file
         plate_id: Specific plate ID to check (None for all plates combined)
-        
+        plates: Pre-parsed plate list (avoids redundant ZIP opens)
+
     Returns:
         Dictionary with bounds information
     """
-    plates, is_multi_plate = parse_multi_plate_3mf(file_path)
-    
-    if not is_multi_plate:
-        # Single plate file - load entire scene
-        scene = trimesh.load(str(file_path), file_type='3mf')
-        bounds = scene.bounds
-        return {
-            "plates": [],
-            "is_multi_plate": False,
-            "bounds": {
-                "min": bounds[0].tolist(),
-                "max": bounds[1].tolist(),
-                "size": (bounds[1] - bounds[0]).tolist()
-            }
-        }
-    
-    # Multi-plate file
-    if plate_id is None:
-        # Combined bounds of all plates
-        scene = trimesh.load(str(file_path), file_type='3mf')
-        bounds = scene.bounds
-        return {
-            "plates": [p.to_dict() for p in plates],
-            "is_multi_plate": True,
-            "bounds": {
-                "min": bounds[0].tolist(),
-                "max": bounds[1].tolist(),
-                "size": (bounds[1] - bounds[0]).tolist()
-            }
-        }
-    else:
-        # Bounds for specific plate - extract only this plate's geometry
-        try:
-            # Find the target plate info
-            target_plate = None
-            for p in plates:
-                if p.plate_id == plate_id:
-                    target_plate = p
-                    break
-            
-            if target_plate is None:
-                raise ValueError(f"Plate {plate_id} not found")
-
-            # Extract the specific object for this plate
-            plate_mesh = _extract_plate_mesh(file_path, target_plate)
-            
-            if plate_mesh is None:
-                # Fallback to translation-based estimation
-                logger.warning(f"Could not extract mesh for plate {plate_id}, using translation estimate")
-                tx, ty, tz = target_plate.get_translation()
-                # Use a reasonable default size for small objects
-                plate_min = [tx - 40, ty - 15, tz]
-                plate_max = [tx + 40, ty + 15, tz + 20]
-            else:
-                # Raw mesh bounds are local coordinates relative to the object's origin
-                raw_bounds = plate_mesh.bounds
-                
-                # Get the plate's translation from the transform
-                tx, ty, tz = target_plate.get_translation()
-                
-                # Add translation to get world-space bounds
-                plate_min = [raw_bounds[0][0] + tx, raw_bounds[0][1] + ty, raw_bounds[0][2] + tz]
-                plate_max = [raw_bounds[1][0] + tx, raw_bounds[1][1] + ty, raw_bounds[1][2] + tz]
-            
-            return {
-                "plates": [target_plate.to_dict()],
-                "is_multi_plate": True,
-                "plate_id": plate_id,
-                "bounds": {
-                    "min": plate_min,
-                    "max": plate_max,
-                    "size": [plate_max[0] - plate_min[0], plate_max[1] - plate_min[1], plate_max[2] - plate_min[2]]
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to calculate plate {plate_id} bounds: {str(e)}")
-            raise ValueError(f"Could not calculate plate bounds: {str(e)}")
-
-
-def _extract_plate_mesh(file_path: Path, plate: PlateInfo) -> Optional[trimesh.Trimesh]:
-    """
-    Extract the mesh geometry for a specific plate from a multi-plate 3MF file.
-    
-    Args:
-        file_path: Path to .3mf file
-        plate: PlateInfo object for the target plate
-        
-    Returns:
-        trimesh.Trimesh object for the plate, or None if extraction fails
-    """
-    try:
-        with zipfile.ZipFile(file_path, "r") as zf:
-            # Read the main model file to find the object
-            model_xml = zf.read("3D/3dmodel.model")
-            root = ET.fromstring(model_xml)
-            
-            ns = {
-                "m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
-                "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
-            }
-            
-            # Find the object in resources
-            resources = root.find("m:resources", ns)
-            if resources is None:
-                logger.warning("No resources section found in 3MF")
-                return None
-                
-            # Look for the target object
-            target_object_id = plate.object_id
-            
-            for obj in resources.findall("m:object", ns):
-                if obj.get("id") == target_object_id:
-                    # Check if this object has inline mesh
-                    mesh = obj.find("m:mesh", ns)
-                    if mesh is not None:
-                        return _parse_inline_mesh(mesh, ns)
-                    
-                    # Check if this object has component references
-                    components = obj.find("m:components", ns)
-                    if components is not None:
-                        return _parse_components(zf, components, ns)
-                    
-                    logger.warning(f"Object {target_object_id} has no mesh or components")
-                    return None
-                    
-            logger.warning(f"Object {target_object_id} not found in resources")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Failed to extract plate mesh: {str(e)}")
-        return None
-
-
-def _parse_inline_mesh(mesh_elem, ns: Dict[str, str]) -> Optional[trimesh.Trimesh]:
-    """Parse inline mesh data from a 3MF object."""
-    try:
-        vertices_elem = mesh_elem.find("m:vertices", ns)
-        triangles_elem = mesh_elem.find("m:triangles", ns)
-        
-        if vertices_elem is None or triangles_elem is None:
-            return None
-            
-        # Extract vertices
-        vertices = []
-        for vertex in vertices_elem.findall("m:vertex", ns):
-            x = float(vertex.get("x"))
-            y = float(vertex.get("y"))
-            z = float(vertex.get("z"))
-            vertices.append([x, y, z])
-            
-        # Extract triangles (face indices)
-        faces = []
-        for triangle in triangles_elem.findall("m:triangle", ns):
-            v1 = int(triangle.get("v1"))
-            v2 = int(triangle.get("v2"))
-            v3 = int(triangle.get("v3"))
-            faces.append([v1, v2, v3])
-            
-        if len(vertices) == 0 or len(faces) == 0:
-            return None
-            
-        # Create trimesh object
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-        return mesh
-        
-    except Exception as e:
-        logger.error(f"Failed to parse inline mesh: {str(e)}")
-        return None
-
-
-def _parse_components(zf: zipfile.ZipFile, components_elem, ns: Dict[str, str]) -> Optional[trimesh.Trimesh]:
-    """Parse component references from a 3MF object."""
-    try:
-        meshes = []
-        p_ns = ns["p"]
-        
-        for component in components_elem.findall("m:component", ns):
-            ref_path = component.get(f"{{{p_ns}}}path")
-            ref_object_id = component.get("objectid")
-            
-            if ref_path and ref_object_id:
-                try:
-                    # Clean the path and read the referenced model file
-                    ref_path_clean = ref_path.lstrip("/")
-                    ref_xml = zf.read(ref_path_clean)
-                    ref_root = ET.fromstring(ref_xml)
-                    
-                    # Find the referenced object
-                    ref_resources = ref_root.find("m:resources", ns)
-                    if ref_resources is not None:
-                        for ref_obj in ref_resources.findall("m:object", ns):
-                            if ref_obj.get("id") == ref_object_id:
-                                ref_mesh = ref_obj.find("m:mesh", ns)
-                                if ref_mesh is not None:
-                                    mesh = _parse_inline_mesh(ref_mesh, ns)
-                                    if mesh is not None:
-                                        meshes.append(mesh)
-                                break
-                                
-                except (KeyError, ET.ParseError) as e:
-                    logger.warning(f"Failed to load component {ref_path}: {str(e)}")
-                    continue
-        
-        # Combine all component meshes
-        if meshes:
-            if len(meshes) == 1:
-                return meshes[0]
-            else:
-                # Merge multiple meshes
-                combined = meshes[0]
-                for mesh in meshes[1:]:
-                    combined = combined + mesh
-                return combined
-                
-        return None
-        
-    except Exception as e:
-        logger.error(f"Failed to parse components: {str(e)}")
-        return None
+    return _calculate_xml_bounds(file_path, plates=plates, plate_id=plate_id)
 
 
 def extract_plate_to_3mf(source_3mf: Path, target_plate_id: int, output_3mf: Path) -> Path:

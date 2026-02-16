@@ -24,8 +24,9 @@ test.describe('Settings Modal', () => {
     await expect(page.locator('span').filter({ hasText: /^E4$/ }).first()).toBeVisible();
   });
 
-  test('Save as Defaults button exists', async ({ page }) => {
-    await expect(page.getByRole('button', { name: /Save as Defaults/i })).toBeVisible();
+  test('settings auto-save on modal close (no Save button)', async ({ page }) => {
+    // "Save as Defaults" was removed — settings auto-save when modal closes.
+    await expect(page.getByRole('button', { name: /Save as Defaults/i })).not.toBeVisible();
   });
 
   test('filament library shows entries', async ({ page }) => {
@@ -59,6 +60,9 @@ test.describe('Settings Modal', () => {
   });
 
   test('Initialize Starter Library button is present', async ({ page }) => {
+    // Scroll to Filament Library section (may be below viewport)
+    const heading = page.getByRole('heading', { name: 'Filament Library' });
+    await heading.scrollIntoViewIfNeeded();
     const initBtn = page.getByRole('button', { name: /Initialize Starter Library/i });
     await expect(initBtn).toBeVisible();
     // Button is disabled when filaments already exist — just check it's rendered
@@ -101,50 +105,55 @@ test.describe('Settings API', () => {
 
   test('filament CRUD lifecycle', async ({ request }) => {
     const API = 'http://localhost:8000';
+    let filId: number | undefined;
+    try {
+      // Create
+      const createRes = await request.post(`${API}/filaments`, {
+        data: {
+          name: `Test Filament ${Date.now()}`,
+          material: 'PLA',
+          nozzle_temp: 200,
+          bed_temp: 60,
+          print_speed: 60,
+          bed_type: 'PEI',
+        },
+      });
+      expect(createRes.ok()).toBe(true);
+      const created = await createRes.json();
+      filId = created.id;
 
-    // Create
-    const createRes = await request.post(`${API}/filaments`, {
-      data: {
-        name: `Test Filament ${Date.now()}`,
-        material: 'PLA',
-        nozzle_temp: 200,
-        bed_temp: 60,
-        print_speed: 60,
-        bed_type: 'PEI',
-      },
-    });
-    expect(createRes.ok()).toBe(true);
-    const created = await createRes.json();
-    const filId = created.id;
+      // Read
+      const listRes = await request.get(`${API}/filaments`);
+      const filaments = (await listRes.json()).filaments;
+      const found = filaments.find((f: any) => f.id === filId);
+      expect(found).toBeDefined();
 
-    // Read
-    const listRes = await request.get(`${API}/filaments`);
-    const filaments = (await listRes.json()).filaments;
-    const found = filaments.find((f: any) => f.id === filId);
-    expect(found).toBeDefined();
+      // Update (all required fields must be sent)
+      const updateRes = await request.put(`${API}/filaments/${filId}`, {
+        data: {
+          name: `Updated ${Date.now()}`,
+          material: 'PETG',
+          nozzle_temp: 230,
+          bed_temp: 70,
+          print_speed: 50,
+          bed_type: 'PEI',
+        },
+      });
+      expect(updateRes.ok()).toBe(true);
 
-    // Update (all required fields must be sent)
-    const updateRes = await request.put(`${API}/filaments/${filId}`, {
-      data: {
-        name: `Updated ${Date.now()}`,
-        material: 'PETG',
-        nozzle_temp: 230,
-        bed_temp: 70,
-        print_speed: 50,
-        bed_type: 'PEI',
-      },
-    });
-    expect(updateRes.ok()).toBe(true);
+      // Delete
+      const delRes = await request.delete(`${API}/filaments/${filId}`);
+      expect(delRes.ok()).toBe(true);
+      filId = undefined; // Already deleted
 
-    // Delete
-    const delRes = await request.delete(`${API}/filaments/${filId}`);
-    expect(delRes.ok()).toBe(true);
-
-    // Verify gone
-    const listRes2 = await request.get(`${API}/filaments`);
-    const filaments2 = (await listRes2.json()).filaments;
-    const gone = filaments2.find((f: any) => f.id === filId);
-    expect(gone).toBeUndefined();
+      // Verify gone
+      const listRes2 = await request.get(`${API}/filaments`);
+      const filaments2 = (await listRes2.json()).filaments;
+      const gone = filaments2.find((f: any) => f.id === created.id);
+      expect(gone).toBeUndefined();
+    } finally {
+      if (filId) await request.delete(`${API}/filaments/${filId}`);
+    }
   });
 });
 
@@ -179,70 +188,76 @@ test.describe('Filament Import/Export (M13)', () => {
   });
 
   test('import stores slicer_settings and has_slicer_settings flag', async ({ request }) => {
-    const filePath = fixture('test-filament-profile.json');
-    const fileBuffer = fs.readFileSync(filePath);
+    let importedId: number | undefined;
+    try {
+      const filePath = fixture('test-filament-profile.json');
+      const fileBuffer = fs.readFileSync(filePath);
 
-    // Import the profile
-    const importRes = await request.post(`${API}/filaments/import`, {
-      multipart: {
-        file: {
-          name: 'test-filament-profile.json',
-          mimeType: 'application/json',
-          buffer: fileBuffer,
+      // Import the profile
+      const importRes = await request.post(`${API}/filaments/import`, {
+        multipart: {
+          file: {
+            name: 'test-filament-profile.json',
+            mimeType: 'application/json',
+            buffer: fileBuffer,
+          },
         },
-      },
-    });
-    expect(importRes.ok()).toBe(true);
-    const imported = await importRes.json();
-    expect(imported.id).toBeDefined();
-    expect(imported.has_slicer_settings).toBe(true);
+      });
+      expect(importRes.ok()).toBe(true);
+      const imported = await importRes.json();
+      importedId = imported.id;
+      expect(imported.id).toBeDefined();
+      expect(imported.has_slicer_settings).toBe(true);
 
-    // Verify in filament list
-    const listRes = await request.get(`${API}/filaments`);
-    const filaments = (await listRes.json()).filaments;
-    const found = filaments.find((f: any) => f.id === imported.id);
-    expect(found).toBeDefined();
-    expect(found.has_slicer_settings).toBe(true);
-
-    // Cleanup
-    await request.delete(`${API}/filaments/${imported.id}`);
+      // Verify in filament list
+      const listRes = await request.get(`${API}/filaments`);
+      const filaments = (await listRes.json()).filaments;
+      const found = filaments.find((f: any) => f.id === imported.id);
+      expect(found).toBeDefined();
+      expect(found.has_slicer_settings).toBe(true);
+    } finally {
+      if (importedId) await request.delete(`${API}/filaments/${importedId}`);
+    }
   });
 
   test('export returns OrcaSlicer-compatible JSON with slicer_settings', async ({ request }) => {
-    const filePath = fixture('test-filament-profile.json');
-    const fileBuffer = fs.readFileSync(filePath);
+    let importedId: number | undefined;
+    try {
+      const filePath = fixture('test-filament-profile.json');
+      const fileBuffer = fs.readFileSync(filePath);
 
-    // Import first
-    const importRes = await request.post(`${API}/filaments/import`, {
-      multipart: {
-        file: {
-          name: 'test-filament-profile.json',
-          mimeType: 'application/json',
-          buffer: fileBuffer,
+      // Import first
+      const importRes = await request.post(`${API}/filaments/import`, {
+        multipart: {
+          file: {
+            name: 'test-filament-profile.json',
+            mimeType: 'application/json',
+            buffer: fileBuffer,
+          },
         },
-      },
-    });
-    const imported = await importRes.json();
+      });
+      const imported = await importRes.json();
+      importedId = imported.id;
 
-    // Export
-    const exportRes = await request.get(`${API}/filaments/${imported.id}/export`);
-    expect(exportRes.ok()).toBe(true);
-    const exported = await exportRes.json();
+      // Export
+      const exportRes = await request.get(`${API}/filaments/${imported.id}/export`);
+      expect(exportRes.ok()).toBe(true);
+      const exported = await exportRes.json();
 
-    // Should be OrcaSlicer-shaped
-    expect(exported.type).toBe('filament');
-    expect(exported.name).toContain('Test PLA Custom');
-    expect(exported.filament_type).toBeDefined();
-    expect(exported.nozzle_temperature).toBeDefined();
+      // Should be OrcaSlicer-shaped
+      expect(exported.type).toBe('filament');
+      expect(exported.name).toContain('Test PLA Custom');
+      expect(exported.filament_type).toBeDefined();
+      expect(exported.nozzle_temperature).toBeDefined();
 
-    // Should contain the passthrough slicer settings
-    expect(exported.filament_max_volumetric_speed).toBeDefined();
-    expect(exported.filament_flow_ratio).toBeDefined();
-    expect(exported.filament_retraction_length).toBeDefined();
-    expect(exported.fan_max_speed).toBeDefined();
-
-    // Cleanup
-    await request.delete(`${API}/filaments/${imported.id}`);
+      // Should contain the passthrough slicer settings
+      expect(exported.filament_max_volumetric_speed).toBeDefined();
+      expect(exported.filament_flow_ratio).toBeDefined();
+      expect(exported.filament_retraction_length).toBeDefined();
+      expect(exported.fan_max_speed).toBeDefined();
+    } finally {
+      if (importedId) await request.delete(`${API}/filaments/${importedId}`);
+    }
   });
 
   test('export for starter filament (no slicer_settings) returns basic profile', async ({ request }) => {
@@ -270,48 +285,53 @@ test.describe('Filament Import/Export (M13)', () => {
   });
 
   test('import round-trip preserves slicer settings', async ({ request }) => {
-    const filePath = fixture('test-filament-profile.json');
-    const fileBuffer = fs.readFileSync(filePath);
+    let importedId: number | undefined;
+    let reImportedId: number | undefined;
+    try {
+      const filePath = fixture('test-filament-profile.json');
+      const fileBuffer = fs.readFileSync(filePath);
 
-    // Import
-    const importRes = await request.post(`${API}/filaments/import`, {
-      multipart: {
-        file: {
-          name: 'test-filament-profile.json',
-          mimeType: 'application/json',
-          buffer: fileBuffer,
+      // Import
+      const importRes = await request.post(`${API}/filaments/import`, {
+        multipart: {
+          file: {
+            name: 'test-filament-profile.json',
+            mimeType: 'application/json',
+            buffer: fileBuffer,
+          },
         },
-      },
-    });
-    const imported = await importRes.json();
+      });
+      const imported = await importRes.json();
+      importedId = imported.id;
 
-    // Export
-    const exportRes = await request.get(`${API}/filaments/${imported.id}/export`);
-    const exported = await exportRes.json();
+      // Export
+      const exportRes = await request.get(`${API}/filaments/${imported.id}/export`);
+      const exported = await exportRes.json();
 
-    // Re-import the exported profile
-    const reImportRes = await request.post(`${API}/filaments/import`, {
-      multipart: {
-        file: {
-          name: 're-exported.json',
-          mimeType: 'application/json',
-          buffer: Buffer.from(JSON.stringify(exported)),
+      // Re-import the exported profile
+      const reImportRes = await request.post(`${API}/filaments/import`, {
+        multipart: {
+          file: {
+            name: 're-exported.json',
+            mimeType: 'application/json',
+            buffer: Buffer.from(JSON.stringify(exported)),
+          },
         },
-      },
-    });
-    expect(reImportRes.ok()).toBe(true);
-    const reImported = await reImportRes.json();
-    expect(reImported.has_slicer_settings).toBe(true);
+      });
+      expect(reImportRes.ok()).toBe(true);
+      const reImported = await reImportRes.json();
+      reImportedId = reImported.id;
+      expect(reImported.has_slicer_settings).toBe(true);
 
-    // Re-export and compare key slicer settings
-    const reExportRes = await request.get(`${API}/filaments/${reImported.id}/export`);
-    const reExported = await reExportRes.json();
-    expect(reExported.filament_max_volumetric_speed).toEqual(exported.filament_max_volumetric_speed);
-    expect(reExported.filament_flow_ratio).toEqual(exported.filament_flow_ratio);
-
-    // Cleanup
-    await request.delete(`${API}/filaments/${imported.id}`);
-    await request.delete(`${API}/filaments/${reImported.id}`);
+      // Re-export and compare key slicer settings
+      const reExportRes = await request.get(`${API}/filaments/${reImported.id}/export`);
+      const reExported = await reExportRes.json();
+      expect(reExported.filament_max_volumetric_speed).toEqual(exported.filament_max_volumetric_speed);
+      expect(reExported.filament_flow_ratio).toEqual(exported.filament_flow_ratio);
+    } finally {
+      if (importedId) await request.delete(`${API}/filaments/${importedId}`);
+      if (reImportedId) await request.delete(`${API}/filaments/${reImportedId}`);
+    }
   });
 
   test('Bambu profile derives speed from volumetric flow limit', async ({ request }) => {
@@ -334,5 +354,289 @@ test.describe('Filament Import/Export (M13)', () => {
     expect(data.preview.print_speed).toBe(262);
     expect(data.preview.nozzle_temp).toBe(220);
     expect(data.preview.is_recognized).toBe(true);
+  });
+
+  test('import preview includes density field', async ({ request }) => {
+    const filePath = fixture('test-filament-profile.json');
+    const fileBuffer = fs.readFileSync(filePath);
+
+    const res = await request.post(`${API}/filaments/import/preview`, {
+      multipart: {
+        file: {
+          name: 'test-filament-profile.json',
+          mimeType: 'application/json',
+          buffer: fileBuffer,
+        },
+      },
+    });
+    expect(res.ok()).toBe(true);
+    const data = await res.json();
+    // Density should be present (either from profile or default 1.24)
+    expect(data.preview.density).toBeDefined();
+    expect(data.preview.density).toBeGreaterThanOrEqual(0.5);
+    expect(data.preview.density).toBeLessThanOrEqual(5.0);
+  });
+
+  test('export includes filament_density field', async ({ request }) => {
+    let importedId: number | undefined;
+    try {
+      const filePath = fixture('test-filament-profile.json');
+      const fileBuffer = fs.readFileSync(filePath);
+
+      // Import first
+      const importRes = await request.post(`${API}/filaments/import`, {
+        multipart: {
+          file: {
+            name: 'test-filament-profile.json',
+            mimeType: 'application/json',
+            buffer: fileBuffer,
+          },
+        },
+      });
+      const imported = await importRes.json();
+      importedId = imported.id;
+
+      // Export
+      const exportRes = await request.get(`${API}/filaments/${imported.id}/export`);
+      expect(exportRes.ok()).toBe(true);
+      const exported = await exportRes.json();
+
+      // Should include filament_density
+      expect(exported.filament_density).toBeDefined();
+    } finally {
+      if (importedId) await request.delete(`${API}/filaments/${importedId}`);
+    }
+  });
+});
+
+test.describe('Filament Density (M19)', () => {
+  const API = 'http://localhost:8000';
+
+  test('create filament with density and verify via list', async ({ request }) => {
+    const name = `Density Test ${Date.now()}`;
+    let createdId: number | undefined;
+    try {
+      const createRes = await request.post(`${API}/filaments`, {
+        data: {
+          name,
+          material: 'PLA',
+          nozzle_temp: 200,
+          bed_temp: 60,
+          print_speed: 60,
+          bed_type: 'PEI',
+          density: 1.24,
+        },
+      });
+      expect(createRes.ok()).toBe(true);
+      const created = await createRes.json();
+      createdId = created.id;
+
+      // Verify density in filament list
+      const listRes = await request.get(`${API}/filaments`);
+      const filaments = (await listRes.json()).filaments;
+      const found = filaments.find((f: any) => f.id === created.id);
+      expect(found).toBeDefined();
+      expect(found.density).toBe(1.24);
+    } finally {
+      if (createdId) await request.delete(`${API}/filaments/${createdId}`);
+    }
+  });
+
+  test('update filament density', async ({ request }) => {
+    const name = `Density Update ${Date.now()}`;
+    let createdId: number | undefined;
+    try {
+      const createRes = await request.post(`${API}/filaments`, {
+        data: {
+          name,
+          material: 'PLA',
+          nozzle_temp: 200,
+          bed_temp: 60,
+          print_speed: 60,
+          bed_type: 'PEI',
+          density: 1.24,
+        },
+      });
+      const created = await createRes.json();
+      createdId = created.id;
+
+      // Update to PETG density
+      const updateRes = await request.put(`${API}/filaments/${created.id}`, {
+        data: {
+          name,
+          material: 'PETG',
+          nozzle_temp: 230,
+          bed_temp: 70,
+          print_speed: 50,
+          bed_type: 'PEI',
+          density: 1.27,
+        },
+      });
+      expect(updateRes.ok()).toBe(true);
+
+      // Verify updated
+      const listRes = await request.get(`${API}/filaments`);
+      const filaments = (await listRes.json()).filaments;
+      const found = filaments.find((f: any) => f.id === created.id);
+      expect(found.density).toBe(1.27);
+    } finally {
+      if (createdId) await request.delete(`${API}/filaments/${createdId}`);
+    }
+  });
+
+  test('filament without explicit density gets default 1.24', async ({ request }) => {
+    let createdId: number | undefined;
+    try {
+      const createRes = await request.post(`${API}/filaments`, {
+        data: {
+          name: `No Density ${Date.now()}`,
+          material: 'PLA',
+          nozzle_temp: 200,
+          bed_temp: 60,
+          print_speed: 60,
+          bed_type: 'PEI',
+        },
+      });
+      expect(createRes.ok()).toBe(true);
+      const created = await createRes.json();
+      createdId = created.id;
+
+      // Verify default density in filament list
+      const listRes = await request.get(`${API}/filaments`);
+      const filaments = (await listRes.json()).filaments;
+      const found = filaments.find((f: any) => f.id === created.id);
+      expect(found).toBeDefined();
+      expect(found.density).toBe(1.24);
+    } finally {
+      if (createdId) await request.delete(`${API}/filaments/${createdId}`);
+    }
+  });
+});
+
+test.describe('Slice Response Metadata', () => {
+  const API = 'http://localhost:8000';
+  test.setTimeout(180_000);
+
+  test('slice response includes filament_used_g array', async ({ request }) => {
+    const filePath = path.resolve(__dirname, '..', 'test-data', 'calib-cube-10-dual-colour-merged.3mf');
+    const buffer = fs.readFileSync(filePath);
+    const uploadRes = await request.post(`${API}/upload`, {
+      multipart: {
+        file: {
+          name: 'calib-cube-10-dual-colour-merged.3mf',
+          mimeType: 'application/octet-stream',
+          buffer,
+        },
+      },
+      timeout: 60_000,
+    });
+    expect(uploadRes.ok()).toBe(true);
+    const upload = await uploadRes.json();
+
+    // Get filament
+    const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
+    const filaments = (await filRes.json()).filaments;
+    const fil = filaments[0];
+
+    // Slice
+    const sliceRes = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+      data: {
+        filament_ids: [fil.id, fil.id],
+        layer_height: 0.2,
+        infill_density: 15,
+        supports: false,
+      },
+      timeout: 120_000,
+    });
+    expect(sliceRes.ok()).toBe(true);
+    const job = await sliceRes.json();
+
+    // filament_used_g should be an array with weight values
+    expect(job.metadata.filament_used_g).toBeDefined();
+    expect(Array.isArray(job.metadata.filament_used_g)).toBe(true);
+    // At least one entry should be > 0 (actual filament usage)
+    const totalWeight = job.metadata.filament_used_g.reduce((a: number, b: number) => a + b, 0);
+    expect(totalWeight).toBeGreaterThan(0);
+  });
+});
+
+test.describe('Settings Auto-Save', () => {
+  const API = 'http://localhost:8000';
+
+  test('slicing defaults persist after save and reload via API', async ({ request }) => {
+    // Snapshot full presets so we can restore on failure
+    const getRes = await request.get(`${API}/presets/extruders`);
+    expect(getRes.ok()).toBe(true);
+    const originalPresets = await getRes.json();
+    try {
+      const originalWallCount = originalPresets.slicing_defaults.wall_count;
+
+      // Change wall_count to something different
+      const newWallCount = originalWallCount === 3 ? 4 : 3;
+      const saveRes = await request.put(`${API}/presets/extruders`, {
+        data: {
+          extruders: originalPresets.extruders,
+          slicing_defaults: {
+            ...originalPresets.slicing_defaults,
+            wall_count: newWallCount,
+          },
+        },
+      });
+      expect(saveRes.ok()).toBe(true);
+
+      // Verify it persisted
+      const getRes2 = await request.get(`${API}/presets/extruders`);
+      const presets2 = await getRes2.json();
+      expect(presets2.slicing_defaults.wall_count).toBe(newWallCount);
+    } finally {
+      // Always restore original presets
+      await request.put(`${API}/presets/extruders`, {
+        data: {
+          extruders: originalPresets.extruders,
+          slicing_defaults: originalPresets.slicing_defaults,
+        },
+      });
+    }
+  });
+
+  test('setting_modes persist across save/load', async ({ request }) => {
+    // Snapshot full presets so we can restore on failure
+    const getRes = await request.get(`${API}/presets/extruders`);
+    expect(getRes.ok()).toBe(true);
+    const originalPresets = await getRes.json();
+    try {
+      // Save with setting_modes
+      const testModes = {
+        layer_height: 'override',
+        infill_density: 'orca',
+        supports: 'model',
+      };
+      const saveRes = await request.put(`${API}/presets/extruders`, {
+        data: {
+          extruders: originalPresets.extruders,
+          slicing_defaults: {
+            ...originalPresets.slicing_defaults,
+            setting_modes: testModes,
+          },
+        },
+      });
+      expect(saveRes.ok()).toBe(true);
+
+      // Verify modes persisted
+      const getRes2 = await request.get(`${API}/presets/extruders`);
+      const presets2 = await getRes2.json();
+      expect(presets2.slicing_defaults.setting_modes).toBeDefined();
+      expect(presets2.slicing_defaults.setting_modes.layer_height).toBe('override');
+      expect(presets2.slicing_defaults.setting_modes.infill_density).toBe('orca');
+      expect(presets2.slicing_defaults.setting_modes.supports).toBe('model');
+    } finally {
+      // Always restore original presets
+      await request.put(`${API}/presets/extruders`, {
+        data: {
+          extruders: originalPresets.extruders,
+          slicing_defaults: originalPresets.slicing_defaults,
+        },
+      });
+    }
   });
 });

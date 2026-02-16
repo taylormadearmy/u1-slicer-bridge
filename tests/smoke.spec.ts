@@ -63,8 +63,8 @@ test.describe('Smoke Tests', () => {
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Printer Defaults' })).toBeVisible();
 
-    // Close settings modal via X button
-    await page.getByTitle('Close').click();
+    // Close settings modal via X button (scope to the visible modal)
+    await page.getByTitle('Close').first().click();
     await expect(page.getByRole('heading', { name: 'Printer Defaults' })).not.toBeVisible();
     await expect(page.getByText('Upload 3MF File')).toBeVisible();
   });

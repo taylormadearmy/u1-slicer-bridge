@@ -15,6 +15,8 @@ function app() {
         currentStep: 'upload',
         activeTab: 'upload', // kept for compatibility — always 'upload' now
         showSettingsModal: false,
+        showStorageDrawer: false,
+        showPrinterStatus: false,
 
         // Data
         uploads: [],
@@ -32,6 +34,7 @@ function app() {
             nozzle_temp: 210,
             bed_temp: 60,
             print_speed: 60,
+            density: 1.24,
             bed_type: 'PEI',
             color_hex: '#FFFFFF',
             extruder_index: 0,
@@ -41,8 +44,6 @@ function app() {
         importPreviewOpen: false,
         importPreviewData: null,
         importPreviewFile: null,
-        selectedIds: {},        // Track selected items { upload_id: bool, job_id: bool }
-        lastSelectedIndex: {},  // Track last selected index per list { uploads: num, jobs: num }
         selectedUpload: null,     // Current upload object
         selectedFilament: null,   // Selected filament ID (single filament mode)
         selectedFilaments: [],    // Selected filament IDs (multi-filament mode)
@@ -69,6 +70,21 @@ function app() {
         printerConnected: false,
         printerStatus: 'Checking...',
 
+        // Printer settings (for Settings modal)
+        printerSettings: { moonraker_url: '' },
+        printerSettingsSaving: false,
+        printerTestResult: null,
+
+        // Print monitor
+        printMonitorActive: false,
+        printSending: false,
+        printState: null,
+        printMonitorInterval: null,
+
+        // 3-way setting modes: 'model' (use file) | 'orca' (process default) | 'override' (custom)
+        settingModes: {},
+        orcaDefaults: {},
+
         // Slicing settings
         machineSettings: {
             layer_height: 0.2,
@@ -76,6 +92,14 @@ function app() {
             wall_count: 3,
             infill_pattern: 'gyroid',
             supports: false,
+            support_type: null,
+            support_threshold_angle: null,
+            brim_type: null,
+            brim_width: null,
+            brim_object_gap: null,
+            skirt_loops: null,
+            skirt_distance: null,
+            skirt_height: null,
             enable_prime_tower: false,
             prime_volume: null,
             prime_tower_width: null,
@@ -97,6 +121,9 @@ function app() {
             brim_type: null,
             brim_width: null,
             brim_object_gap: null,
+            skirt_loops: null,
+            skirt_distance: null,
+            skirt_height: null,
             enable_prime_tower: false,
             prime_volume: null,
             prime_tower_width: null,
@@ -124,6 +151,8 @@ function app() {
             console.log('U1 Slicer Bridge - Initializing...');
 
             // Load initial data
+            this.loadOrcaDefaults(); // non-blocking
+            this.loadPrinterSettings(); // non-blocking, pre-load for settings modal
             await this.checkPrinterStatus();
             await this.loadFilaments();
             await this.loadExtruderPresets();
@@ -141,7 +170,16 @@ function app() {
             try {
                 const status = await api.getPrinterStatus();
                 this.printerConnected = status.connected;
-                this.printerStatus = status.connected ? 'Connected' : 'Offline';
+                // Show print progress in header when actively printing
+                if (status.print_status && status.print_status.state === 'printing') {
+                    const pct = Math.round((status.print_status.progress || 0) * 100);
+                    this.printerStatus = `Printing ${pct}%`;
+                } else if (status.print_status && status.print_status.state === 'paused') {
+                    const pct = Math.round((status.print_status.progress || 0) * 100);
+                    this.printerStatus = `Paused ${pct}%`;
+                } else {
+                    this.printerStatus = status.connected ? 'Connected' : 'Offline';
+                }
             } catch (err) {
                 this.printerConnected = false;
                 this.printerStatus = 'Error';
@@ -164,6 +202,17 @@ function app() {
         },
 
         /**
+         * Load Orca process profile defaults for UI hints.
+         */
+        async loadOrcaDefaults() {
+            try {
+                this.orcaDefaults = await api.getOrcaDefaults();
+            } catch (err) {
+                console.warn('Failed to load Orca defaults:', err);
+            }
+        },
+
+        /**
          * Load persistent extruder and slicing defaults presets.
          */
         async loadExtruderPresets() {
@@ -179,12 +228,16 @@ function app() {
                 }
 
                 if (response.slicing_defaults) {
+                    const { setting_modes, ...rest } = response.slicing_defaults;
                     this.machineSettings = {
                         ...this.machineSettings,
-                        ...response.slicing_defaults,
+                        ...rest,
                     };
                     this.machineSettings.layer_height = this.normalizeLayerHeight(this.machineSettings.layer_height);
                     this.machineSettings.nozzle_temp = null;
+                    if (setting_modes && typeof setting_modes === 'object') {
+                        this.settingModes = setting_modes;
+                    }
                 }
 
                 this.applyPresetDefaults();
@@ -214,6 +267,14 @@ function app() {
                         wall_count: this.machineSettings.wall_count,
                         infill_pattern: this.machineSettings.infill_pattern,
                         supports: this.machineSettings.supports,
+                        support_type: this.machineSettings.support_type,
+                        support_threshold_angle: this.machineSettings.support_threshold_angle,
+                        brim_type: this.machineSettings.brim_type,
+                        brim_width: this.machineSettings.brim_width,
+                        brim_object_gap: this.machineSettings.brim_object_gap,
+                        skirt_loops: this.machineSettings.skirt_loops,
+                        skirt_distance: this.machineSettings.skirt_distance,
+                        skirt_height: this.machineSettings.skirt_height,
                         enable_prime_tower: this.machineSettings.enable_prime_tower,
                         prime_volume: this.machineSettings.prime_volume,
                         prime_tower_width: this.machineSettings.prime_tower_width,
@@ -222,6 +283,7 @@ function app() {
                         prime_tower_brim_chamfer_max_width: this.machineSettings.prime_tower_brim_chamfer_max_width,
                         bed_temp: this.machineSettings.bed_temp,
                         bed_type: this.machineSettings.bed_type,
+                        setting_modes: this.settingModes,
                     },
                 };
 
@@ -257,9 +319,7 @@ function app() {
                 this.selectedFilaments = presetFilaments;
             }
 
-            this.sliceSettings.filament_colors = this.extruderPresets
-                .map((p) => p.color_hex || '#FFFFFF')
-                .slice(0, this.maxExtruders);
+            this.syncFilamentColors();
             this.sliceSettings.extruder_assignments = [0, 1, 2, 3];
         },
 
@@ -269,27 +329,33 @@ function app() {
         },
 
         applyPrinterDefaultsToOverrides() {
+            const modeKeys = [
+                'layer_height', 'infill_density', 'wall_count', 'infill_pattern',
+                'supports', 'support_type', 'support_threshold_angle',
+                'brim_type', 'brim_width', 'brim_object_gap',
+                'skirt_loops', 'skirt_distance', 'skirt_height',
+                'enable_prime_tower', 'prime_volume', 'prime_tower_width',
+                'prime_tower_brim_width', 'prime_tower_brim_chamfer',
+                'prime_tower_brim_chamfer_max_width',
+                'bed_temp', 'bed_type',
+            ];
+            const s = {};
+            for (const key of modeKeys) {
+                const mode = this.settingModes[key] || 'model';
+                if (mode === 'override') {
+                    let v = this.machineSettings[key];
+                    if (key === 'layer_height' && v != null) v = this.normalizeLayerHeight(v);
+                    s[key] = v ?? null;
+                } else {
+                    // 'model' or 'orca': use Orca process default as baseline
+                    // For 'model' mode, applyFileSettings() may overwrite with file values
+                    s[key] = this.orcaDefaults[key] ?? null;
+                }
+            }
             this.sliceSettings = {
                 ...this.sliceSettings,
-                layer_height: this.normalizeLayerHeight(this.machineSettings.layer_height),
-                infill_density: this.machineSettings.infill_density,
-                wall_count: this.machineSettings.wall_count,
-                infill_pattern: this.machineSettings.infill_pattern,
-                supports: this.machineSettings.supports,
-                support_type: null,
-                support_threshold_angle: null,
-                brim_type: null,
-                brim_width: null,
-                brim_object_gap: null,
-                enable_prime_tower: this.machineSettings.enable_prime_tower,
-                prime_volume: this.machineSettings.prime_volume,
-                prime_tower_width: this.machineSettings.prime_tower_width,
-                prime_tower_brim_width: this.machineSettings.prime_tower_brim_width,
-                prime_tower_brim_chamfer: this.machineSettings.prime_tower_brim_chamfer,
-                prime_tower_brim_chamfer_max_width: this.machineSettings.prime_tower_brim_chamfer_max_width,
+                ...s,
                 nozzle_temp: null,
-                bed_temp: this.machineSettings.bed_temp,
-                bed_type: this.machineSettings.bed_type,
             };
         },
 
@@ -299,57 +365,71 @@ function app() {
          */
         applyFileSettings(settings) {
             if (!settings || Object.keys(settings).length === 0) return;
+
+            // Only apply file values for settings in 'model' mode
+            const ok = (key) => (this.settingModes[key] || 'model') === 'model';
+
             // Support
-            if (settings.enable_support !== undefined) {
+            if (ok('supports') && settings.enable_support !== undefined) {
                 this.sliceSettings.supports = !!settings.enable_support;
             }
-            if (settings.support_type) {
+            if (ok('support_type') && settings.support_type) {
                 this.sliceSettings.support_type = settings.support_type;
             }
-            if (settings.support_threshold_angle !== undefined) {
+            if (ok('support_threshold_angle') && settings.support_threshold_angle !== undefined) {
                 this.sliceSettings.support_threshold_angle = settings.support_threshold_angle;
             }
             // Brim
-            if (settings.brim_type) {
+            if (ok('brim_type') && settings.brim_type) {
                 this.sliceSettings.brim_type = settings.brim_type;
             }
-            if (settings.brim_width !== undefined) {
+            if (ok('brim_width') && settings.brim_width !== undefined) {
                 this.sliceSettings.brim_width = settings.brim_width;
             }
-            if (settings.brim_object_gap !== undefined) {
+            if (ok('brim_object_gap') && settings.brim_object_gap !== undefined) {
                 this.sliceSettings.brim_object_gap = settings.brim_object_gap;
             }
+            // Skirt
+            if (ok('skirt_loops') && settings.skirt_loops !== undefined) {
+                this.sliceSettings.skirt_loops = settings.skirt_loops;
+            }
+            if (ok('skirt_distance') && settings.skirt_distance !== undefined) {
+                this.sliceSettings.skirt_distance = settings.skirt_distance;
+            }
+            if (ok('skirt_height') && settings.skirt_height !== undefined) {
+                this.sliceSettings.skirt_height = settings.skirt_height;
+            }
             // Wall / Infill / Layer
-            if (settings.wall_loops !== undefined) {
+            if (ok('wall_count') && settings.wall_loops !== undefined) {
                 this.sliceSettings.wall_count = settings.wall_loops;
             }
-            if (settings.sparse_infill_density !== undefined) {
+            if (ok('infill_density') && settings.sparse_infill_density !== undefined) {
                 this.sliceSettings.infill_density = settings.sparse_infill_density;
             }
-            if (settings.sparse_infill_pattern) {
+            if (ok('infill_pattern') && settings.sparse_infill_pattern) {
                 this.sliceSettings.infill_pattern = settings.sparse_infill_pattern;
             }
-            if (settings.layer_height !== undefined) {
+            if (ok('layer_height') && settings.layer_height !== undefined) {
                 this.sliceSettings.layer_height = settings.layer_height;
             }
             // Prime tower
-            if (settings.enable_prime_tower !== undefined) {
+            if (ok('enable_prime_tower') && settings.enable_prime_tower !== undefined) {
                 this.sliceSettings.enable_prime_tower = !!settings.enable_prime_tower;
             }
-            if (settings.prime_tower_width !== undefined) {
+            if (ok('prime_tower_width') && settings.prime_tower_width !== undefined) {
                 this.sliceSettings.prime_tower_width = settings.prime_tower_width;
             }
-            if (settings.prime_tower_brim_width !== undefined) {
+            if (ok('prime_tower_brim_width') && settings.prime_tower_brim_width !== undefined) {
                 this.sliceSettings.prime_tower_brim_width = settings.prime_tower_brim_width;
             }
-            if (settings.prime_volume !== undefined) {
+            if (ok('prime_volume') && settings.prime_volume !== undefined) {
                 this.sliceSettings.prime_volume = settings.prime_volume;
             }
             // Temperature / Bed
-            if (settings.bed_temperature !== undefined) {
+            if (ok('bed_temp') && settings.bed_temperature !== undefined) {
                 this.sliceSettings.bed_temp = settings.bed_temperature;
             }
-            if (settings.curr_bed_type) {
+            if (ok('bed_type') && settings.curr_bed_type) {
                 this.sliceSettings.bed_type = settings.curr_bed_type;
             }
         },
@@ -373,7 +453,11 @@ function app() {
          * Uses a mapping from fileSettings keys to sliceSettings keys.
          */
         settingSource(sliceKey) {
-            if (!this.fileSettings) return 'default';
+            const mode = this.settingModes[sliceKey] || 'model';
+            if (mode === 'override') return 'override';
+            if (mode === 'orca') return 'orca';
+            // mode === 'model': check if file provided the value
+            if (!this.fileSettings) return 'orca';
             const keyMap = {
                 layer_height: 'layer_height',
                 infill_density: 'sparse_infill_density',
@@ -385,6 +469,9 @@ function app() {
                 brim_type: 'brim_type',
                 brim_width: 'brim_width',
                 brim_object_gap: 'brim_object_gap',
+                skirt_loops: 'skirt_loops',
+                skirt_distance: 'skirt_distance',
+                skirt_height: 'skirt_height',
                 enable_prime_tower: 'enable_prime_tower',
                 prime_tower_width: 'prime_tower_width',
                 prime_tower_brim_width: 'prime_tower_brim_width',
@@ -393,8 +480,8 @@ function app() {
                 bed_type: 'curr_bed_type',
             };
             const fileKey = keyMap[sliceKey];
-            if (!fileKey) return 'default';
-            return this.fileSettings[fileKey] !== undefined ? 'file' : 'default';
+            if (!fileKey) return 'orca';
+            return this.fileSettings[fileKey] !== undefined ? 'file' : 'orca';
         },
 
         normalizeLayerHeight(value) {
@@ -408,11 +495,70 @@ function app() {
         },
 
         openSettings() {
+            this.showStorageDrawer = false;
+            this.showPrinterStatus = false;
             this.showSettingsModal = true;
+            this.loadPrinterSettings();
         },
 
-        closeSettings() {
+        async closeSettings() {
             this.showSettingsModal = false;
+            // Auto-save all settings on close
+            try {
+                await Promise.all([
+                    this.saveExtruderPresets(),
+                    this.savePrinterSettings(),
+                ]);
+            } catch (err) {
+                console.warn('Auto-save on close failed:', err);
+            }
+        },
+
+        openStorage() {
+            this.showSettingsModal = false;
+            this.showPrinterStatus = false;
+            this.showStorageDrawer = true;
+        },
+
+        closeStorage() {
+            this.showStorageDrawer = false;
+        },
+
+        openPrinterStatus() {
+            this.showSettingsModal = false;
+            this.showStorageDrawer = false;
+            this.showPrinterStatus = true;
+            // Start polling for live updates
+            this.pollPrintStatus();
+            if (!this.printMonitorInterval) {
+                this.startPrintMonitorPolling();
+            }
+        },
+
+        closePrinterStatus() {
+            this.showPrinterStatus = false;
+            // Keep polling if actively printing, stop otherwise
+            if (!this.printState?.state || this.printState.state === 'standby' ||
+                this.printState.state === 'complete' || this.printState.state === 'error') {
+                this.stopPrintMonitorPolling();
+            }
+        },
+
+        groupedFiles() {
+            return this.uploads.map(u => ({
+                ...u,
+                jobs: this.jobs.filter(j => j.upload_id === u.upload_id),
+            }));
+        },
+
+        selectUploadFromDrawer(upload) {
+            this.closeStorage();
+            this.selectUpload(upload);
+        },
+
+        viewJobFromDrawer(job) {
+            this.closeStorage();
+            this.viewJob(job);
         },
 
         openUpload() {
@@ -491,6 +637,7 @@ function app() {
                 nozzle_temp: 210,
                 bed_temp: 60,
                 print_speed: 60,
+                density: 1.24,
                 bed_type: 'PEI',
                 color_hex: '#FFFFFF',
                 extruder_index: 0,
@@ -508,6 +655,7 @@ function app() {
                 nozzle_temp: filament.nozzle_temp,
                 bed_temp: filament.bed_temp,
                 print_speed: filament.print_speed || 60,
+                density: filament.density ?? 1.24,
                 bed_type: filament.bed_type || 'PEI',
                 color_hex: filament.color_hex || '#FFFFFF',
                 extruder_index: filament.extruder_index || 0,
@@ -529,6 +677,7 @@ function app() {
                     nozzle_temp: Number(this.filamentForm.nozzle_temp),
                     bed_temp: Number(this.filamentForm.bed_temp),
                     print_speed: Number(this.filamentForm.print_speed),
+                    density: Number(this.filamentForm.density) || 1.24,
                     extruder_index: Number(this.filamentForm.extruder_index),
                 };
 
@@ -666,76 +815,6 @@ function app() {
         },
 
         /**
-         * Toggle selection of an item
-         */
-        toggleSelect(type, id, index, event) {
-            const isShift = event?.shiftKey;
-            const listKey = type === 'upload' ? 'uploads' : 'jobs';
-            const list = this[listKey];
-            
-            if (isShift && this.lastSelectedIndex[listKey] !== undefined) {
-                const lastIdx = this.lastSelectedIndex[listKey];
-                const start = Math.min(lastIdx, index);
-                const end = Math.max(lastIdx, index);
-                
-                for (let i = start; i <= end; i++) {
-                    const item = list[i];
-                    const key = `${type}_${type === 'upload' ? item.upload_id : item.job_id}`;
-                    this.selectedIds[key] = true;
-                }
-            } else {
-                const key = `${type}_${id}`;
-                this.selectedIds[key] = !this.selectedIds[key];
-            }
-            
-            this.lastSelectedIndex[listKey] = index;
-        },
-
-        /**
-         * Check if item is selected
-         */
-        isSelected(type, id) {
-            return !!this.selectedIds[`${type}_${id}`];
-        },
-
-        /**
-         * Delete all selected items
-         */
-        async deleteSelected() {
-            const selectedCount = Object.values(this.selectedIds).filter(v => v).length;
-            if (selectedCount === 0) {
-                this.showError('No items selected');
-                return;
-            }
-            
-            if (!confirm(`Delete ${selectedCount} selected item(s)?`)) return;
-            
-            try {
-                // Delete selected uploads (which will cascade to jobs)
-                for (const upload of this.uploads) {
-                    if (this.selectedIds[`upload_${upload.upload_id}`]) {
-                        await api.deleteUpload(upload.upload_id);
-                    }
-                }
-                
-                // Delete remaining selected jobs
-                for (const job of this.jobs) {
-                    if (this.selectedIds[`job_${job.job_id}`]) {
-                        await api.deleteJob(job.job_id);
-                    }
-                }
-                
-                // Refresh lists
-                await this.loadRecentUploads();
-                await this.loadJobs();
-                this.selectedIds = {};
-            } catch (err) {
-                this.showError('Failed to delete some items');
-                console.error(err);
-            }
-        },
-
-        /**
          * Handle file drop
          */
         handleFileDrop(event) {
@@ -804,18 +883,26 @@ function app() {
                 // Add to uploads list
                 this.uploads.unshift(result);
 
-                // Select this upload and move to configure step
+                // Select this upload for configuration
                 this.selectedUpload = result;
                 this.selectedPlate = null;
                 this.plates = [];
                 this.platesLoading = false;
-                this.currentStep = 'configure';
                 this.activeTab = 'upload';
+
+                // Ensure filaments are loaded before assigning (init() may still
+                // be awaiting checkPrinterStatus when a fast upload completes).
+                if (this.filaments.length === 0) {
+                    await this.loadFilaments();
+                }
 
                 // Initialize detected colors and filament assignment state from upload response
                 this.filamentOverride = false;
                 this.applyDetectedColors(result.detected_colors || []);
                 this.resetJobOverrideSettings();
+
+                // Move to configure step AFTER colors/filaments are ready
+                this.currentStep = 'configure';
                 
                 // Always reload plate info so we get latest validation + preview URLs.
                 this.platesLoading = true;
@@ -897,6 +984,11 @@ function app() {
             });
 
             const [uploadDetails, platesData] = await Promise.all([detailsPromise, platesPromise]);
+
+            // Ensure filaments are loaded before assigning
+            if (this.filaments.length === 0) {
+                await this.loadFilaments();
+            }
 
             // Apply upload details (detected colors, warnings, bounds)
             if (uploadDetails) {
@@ -1008,9 +1100,16 @@ function app() {
             this.activeTab = 'upload';
             this.sliceProgress = 0;
 
+            // Animate progress during the blocking slice POST.
+            // Starts fast, slows down as it approaches 90%.
+            const progressTimer = setInterval(() => {
+                const remaining = 90 - this.sliceProgress;
+                this.sliceProgress += Math.max(1, Math.floor(remaining * 0.08));
+            }, 1000);
+
             try {
                 let result;
-                
+
                 // Prepare slice settings: printer defaults as base, then
                 // sliceSettings overlay (which includes file-detected + user edits)
                 const sliceSettings = {
@@ -1075,6 +1174,7 @@ function app() {
                 }
 
                 console.log('Slice started:', result);
+                clearInterval(progressTimer);
 
                 if (result.status === 'completed') {
                     // Synchronous slicing (completed immediately)
@@ -1087,6 +1187,7 @@ function app() {
                     this.pollSliceStatus(result.job_id);
                 }
             } catch (err) {
+                clearInterval(progressTimer);
                 this.showError(`Slicing failed: ${err.message}`);
                 this.currentStep = 'configure';
                 console.error(err);
@@ -1140,6 +1241,10 @@ function app() {
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
             this.resetJobOverrideSettings();
+            this.stopPrintMonitorPolling();
+            this.printMonitorActive = false;
+            this.printSending = false;
+            this.printState = null;
 
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
@@ -1382,6 +1487,7 @@ function app() {
             }
 
             this.selectedFilaments = next.slice(0, colorCount);
+            this.syncFilamentColors();
         },
 
         /**
@@ -1392,10 +1498,11 @@ function app() {
             this.selectedFilaments = [];
 
             const limitedColors = (colors || []).slice(0, this.maxExtruders);
-            const presetColors = this.extruderPresets.map((p) => p.color_hex || '#FFFFFF');
+            // Use actual detected colors from the 3MF file, not preset colors.
+            // Preset colors default to #FFFFFF which would mask the real file colors.
             this.sliceSettings.filament_colors = limitedColors.length > 0
-                ? limitedColors.map((c, idx) => presetColors[idx] || c || '#FFFFFF')
-                : [...presetColors];
+                ? limitedColors.map((c) => c || '#FFFFFF')
+                : this.extruderPresets.map((p) => p.color_hex || '#FFFFFF');
             this.sliceSettings.extruder_assignments = limitedColors.map((_, idx) => idx);
 
             if (!colors || colors.length === 0) {
@@ -1417,7 +1524,7 @@ function app() {
             if (mappedFromPresets && mappedFromPresets.filamentIds.length === limitedColors.length) {
                 this.selectedFilaments = mappedFromPresets.filamentIds;
                 this.sliceSettings.extruder_assignments = mappedFromPresets.assignments;
-                this.sliceSettings.filament_colors = mappedFromPresets.mappedColors;
+                this.syncFilamentColors();
                 return;
             }
 
@@ -1470,11 +1577,41 @@ function app() {
         },
 
         /**
+         * Sync filament_colors with actual selected filament profile colors.
+         * Called when user changes filament dropdown or extruder assignments.
+         * Preserves detected file colors when filament profile uses default #FFFFFF.
+         */
+        syncFilamentColors() {
+            const existing = this.sliceSettings.filament_colors || [];
+            this.sliceSettings.filament_colors = this.selectedFilaments.map((fid, idx) => {
+                const fil = this.getFilamentById(fid);
+                const profileColor = fil?.color_hex;
+                // If the filament profile has a real (non-default) color, use it.
+                if (profileColor && profileColor.toUpperCase() !== '#FFFFFF') return profileColor;
+                // Otherwise preserve the existing color (from file detection).
+                const presetColor = this.extruderPresets?.[idx]?.color_hex;
+                if (presetColor && presetColor.toUpperCase() !== '#FFFFFF') return presetColor;
+                return existing[idx] || '#FFFFFF';
+            });
+        },
+
+        /**
          * Format filament length in mm to meters
          */
         formatFilament(mm) {
             if (!mm) return '0.0m';
             return `${(mm / 1000).toFixed(1)}m`;
+        },
+
+        /**
+         * Format per-filament weight array to total grams string.
+         * Returns null if no weight data available.
+         */
+        formatFilamentWeight(grams) {
+            if (!grams || grams.length === 0) return null;
+            const total = grams.reduce((a, b) => a + b, 0);
+            if (total <= 0) return null;
+            return total < 100 ? `${total.toFixed(1)}g` : `${Math.round(total)}g`;
         },
 
         /**
@@ -1487,6 +1624,145 @@ function app() {
             }, 5000); // Auto-dismiss after 5 seconds
         },
 
+        // ----- Printer Settings (Settings modal) -----
+
+        async loadPrinterSettings() {
+            try {
+                const data = await api.getPrinterSettings();
+                this.printerSettings = { moonraker_url: data.moonraker_url || '' };
+            } catch (err) {
+                console.warn('Failed to load printer settings:', err);
+            }
+        },
+
+        async savePrinterSettings() {
+            this.printerSettingsSaving = true;
+            this.printerTestResult = null;
+            try {
+                await api.savePrinterSettings({ moonraker_url: this.printerSettings.moonraker_url || '' });
+                this.printerTestResult = { ok: true, message: 'Saved' };
+                // Refresh header status after URL change
+                await this.checkPrinterStatus();
+            } catch (err) {
+                this.printerTestResult = { ok: false, message: err.message };
+            } finally {
+                this.printerSettingsSaving = false;
+                setTimeout(() => { this.printerTestResult = null; }, 4000);
+            }
+        },
+
+        async testPrinterConnection() {
+            this.printerTestResult = { ok: null, message: 'Testing...' };
+            try {
+                // Save first so backend uses the new URL
+                await api.savePrinterSettings({ moonraker_url: this.printerSettings.moonraker_url || '' });
+                const status = await api.getPrinterStatus();
+                if (status.connected) {
+                    this.printerTestResult = { ok: true, message: 'Connected' };
+                } else {
+                    this.printerTestResult = { ok: false, message: 'Printer not reachable' };
+                }
+                // Refresh header status
+                this.printerConnected = status.connected;
+                this.printerStatus = status.connected ? 'Connected' : 'Offline';
+            } catch (err) {
+                this.printerTestResult = { ok: false, message: err.message };
+            }
+        },
+
+        // ----- Print Control -----
+
+        async sendToPrinter() {
+            if (!this.sliceResult?.job_id) return;
+            this.printSending = true;
+            try {
+                await api.sendToPrinter(this.sliceResult.job_id);
+                this.printMonitorActive = true;
+                this.printSending = false;
+                this.startPrintMonitorPolling();
+                // Open printer status page to show live progress
+                this.openPrinterStatus();
+            } catch (err) {
+                this.printSending = false;
+                this.showError(`Failed to send to printer: ${err.message}`);
+            }
+        },
+
+        startPrintMonitorPolling() {
+            this.stopPrintMonitorPolling();
+            // Initial poll immediately
+            this.pollPrintStatus();
+            this.printMonitorInterval = setInterval(() => this.pollPrintStatus(), 3000);
+        },
+
+        stopPrintMonitorPolling() {
+            if (this.printMonitorInterval) {
+                clearInterval(this.printMonitorInterval);
+                this.printMonitorInterval = null;
+            }
+        },
+
+        async pollPrintStatus() {
+            try {
+                const status = await api.getPrintStatus();
+                this.printState = status;
+                // Stop polling when print finishes or errors
+                if (status.state === 'complete' || status.state === 'error' || status.state === 'standby') {
+                    this.stopPrintMonitorPolling();
+                }
+            } catch (err) {
+                console.warn('Print status poll failed:', err);
+            }
+        },
+
+        async pausePrint() {
+            try {
+                await api.pausePrint();
+                await this.pollPrintStatus();
+            } catch (err) {
+                this.showError(`Pause failed: ${err.message}`);
+            }
+        },
+
+        async resumePrint() {
+            try {
+                await api.resumePrint();
+                this.startPrintMonitorPolling();
+            } catch (err) {
+                this.showError(`Resume failed: ${err.message}`);
+            }
+        },
+
+        async cancelPrint() {
+            if (!confirm('Cancel the current print?')) return;
+            try {
+                await api.cancelPrint();
+                await this.pollPrintStatus();
+            } catch (err) {
+                this.showError(`Cancel failed: ${err.message}`);
+            }
+        },
+
+        closePrintMonitor() {
+            this.stopPrintMonitorPolling();
+            this.printMonitorActive = false;
+            this.showPrinterStatus = false;
+            this.printState = null;
+        },
+
+        formatRemainingTime(ps) {
+            if (!ps || !ps.progress || ps.progress <= 0 || !ps.duration) return '--';
+            const elapsed = ps.duration;
+            const estimated = elapsed / ps.progress;
+            const remaining = Math.max(0, estimated - elapsed);
+            return this.formatTime(remaining);
+        },
+
+        printProgressPercent() {
+            if (!this.printState || !this.printState.progress) return 0;
+            return Math.round(this.printState.progress * 100);
+        },
+
         /**
          * Cleanup intervals on destroy
          */
@@ -1494,6 +1770,7 @@ function app() {
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
             }
+            this.stopPrintMonitorPolling();
         },
     };
 }
