@@ -61,6 +61,7 @@ function app() {
             { slot: 3, filament_id: null, color_hex: '#FFFFFF' },
             { slot: 4, filament_id: null, color_hex: '#FFFFFF' },
         ],
+        presetsLoaded: false,
         presetsSaving: false,
         presetMessage: null,
         maxExtruders: 4,
@@ -240,6 +241,7 @@ function app() {
                     }
                 }
 
+                this.presetsLoaded = true;
                 this.applyPresetDefaults();
                 this.resetJobOverrideSettings();
             } catch (err) {
@@ -251,6 +253,7 @@ function app() {
          * Persist extruder presets and current slicing defaults.
          */
         async saveExtruderPresets() {
+            if (!this.presetsLoaded) return; // Don't save before presets loaded from server
             this.presetsSaving = true;
             this.presetMessage = null;
 
