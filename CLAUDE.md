@@ -38,3 +38,4 @@ Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status").
 - Moonraker URL is persisted in `printer_settings` table (configurable via Settings modal)
 - Extruder presets API requires exactly 4 slots (E1-E4) — tests must send all 4
 - 3-way setting modes (model/orca/override) stored in `slicing_defaults.setting_modes` as JSON
+- When adding any third-party library or dependency, update [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) with name, version, license, copyright, and source URL

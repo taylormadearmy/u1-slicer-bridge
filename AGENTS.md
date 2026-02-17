@@ -141,6 +141,14 @@ Avoid:
 - plaintext secrets
 - skipping tests after changes (even "small" ones can break things)
 
+### Third-Party License Attribution
+
+When adding vendored libraries, CDN dependencies, or new pip/npm packages:
+
+1. **Update [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)** with the library name, version, license type, copyright holder, and source URL.
+2. Vendored files in `apps/web/lib/` must retain their original license headers (do not strip `@license` comments from minified files).
+3. All dependencies must be compatible with the project's AGPL-3.0 license.
+
 ### Documentation Maintenance
 
 **CRITICAL:** As you make fixes, implement features, or discover issues:

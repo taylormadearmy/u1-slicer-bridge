@@ -237,7 +237,9 @@ docker compose build api && docker compose up -d api
 
 ## License
 
-Private repository - All rights reserved
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0), matching the OrcaSlicer upstream license.
+
+See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for attribution of all bundled and vendored dependencies.
 
 ## Author
 
