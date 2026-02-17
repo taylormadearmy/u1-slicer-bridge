@@ -5,6 +5,7 @@
 - [AGENTS.md](AGENTS.md) — **Authoritative source.** Milestone tracker, coding conventions, architecture rules, and non-goals. Read this first for any implementation work.
 - [README.md](README.md) — Project overview, tech stack, Docker setup, milestone summary.
 - [TESTING.md](TESTING.md) — Testing procedures and API endpoint reference.
+- [DEPLOY.md](DEPLOY.md) — End-user deployment guide (quick deploy + build from source).
 
 ## Architecture (quick reference)
 

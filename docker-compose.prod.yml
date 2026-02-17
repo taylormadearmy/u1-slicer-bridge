@@ -1,17 +1,25 @@
+# U1 Slicer Bridge — Production Deployment
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Optional: create a .env file to customize (see .env.prod.example)
+
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: u1slicer
-      POSTGRES_PASSWORD: u1slicer
-      POSTGRES_DB: u1slicer
+      POSTGRES_USER: ${POSTGRES_USER:-u1slicer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-u1slicer}
+      POSTGRES_DB: ${POSTGRES_DB:-u1slicer}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U u1slicer"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-u1slicer}"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -22,25 +30,23 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   api:
-    build: ./apps/api
-    ports:
-      - "8000:8000"
+    image: ghcr.io/taylormadearmy/u1-slicer-bridge-api:latest
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-u1slicer}:${POSTGRES_PASSWORD:-u1slicer}@postgres:5432/${POSTGRES_DB:-u1slicer}
+      REDIS_URL: redis://redis:6379/0
+      # MOONRAKER_URL: http://192.168.1.100:7125
     volumes:
       - data_storage:/data
-    environment:
-      DATABASE_URL: postgresql://u1slicer:u1slicer@postgres:5432/u1slicer
-      REDIS_URL: redis://redis:6379/0
-      # MOONRAKER_URL: http://your-printer-ip:7125
-      # ALLOWED_ORIGINS: http://192.168.1.50:8080  # Optional: restrict CORS (defaults to allow all)
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,8 +54,7 @@ services:
         condition: service_healthy
 
   worker:
-    build: ./apps/worker
-    restart: unless-stopped
+    image: ghcr.io/taylormadearmy/u1-slicer-bridge-worker:latest
     volumes:
       - data_storage:/data
       - data_cache:/cache
@@ -59,18 +64,19 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+    restart: unless-stopped
 
   web:
-    build: ./apps/web
+    image: ghcr.io/taylormadearmy/u1-slicer-bridge-web:latest
     ports:
-      - "8080:80"
-    restart: unless-stopped
+      - "${WEB_PORT:-8080}:80"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+    restart: unless-stopped
     depends_on:
       api:
         condition: service_healthy

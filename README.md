@@ -29,12 +29,27 @@ upload .3mf → validate plate → configure → slice → preview → print
 - File management (browse, download, delete uploads and sliced files)
 - Modern web UI with settings modal and 3-step slice workflow
 
+## Quick Start
+
+See **[DEPLOY.md](DEPLOY.md)** for the full deployment guide.
+
+```bash
+# Pre-built images (fastest)
+curl -O https://raw.githubusercontent.com/taylormadearmy/u1-slicer-bridge/master/docker-compose.prod.yml
+docker compose -f docker-compose.prod.yml up -d
+# Open http://localhost:8080
+
+# Or build from source
+git clone https://github.com/taylormadearmy/u1-slicer-bridge.git
+cd u1-slicer-bridge && docker compose up -d --build
+```
+
 ## Architecture
 
 - **Docker-first:** Everything runs via `docker compose`
 - **Snapmaker OrcaSlicer:** Uses Snapmaker's fork (v2.2.4) for Bambu file compatibility
 - **Plate-based workflow:** Preserves MakerWorld/Bambu Studio arrangements, no object normalization
-- **LAN-first security:** Designed for local network use, secrets encrypted via `APP_SECRET_KEY`
+- **LAN-first:** Designed for local network use, no authentication required
 - **Deterministic:** Pinned slicer version, per-job sandboxing, no global slicer state
 
 ### Services
@@ -113,10 +128,10 @@ Inherited `wipe_tower_x`/`wipe_tower_y` values can place the prime tower outside
    cd u1-slicer-bridge
    ```
 
-2. Configure environment:
+2. (Optional) Configure printer connection:
    ```bash
    cp .env.example .env
-   # Edit .env and set your APP_SECRET_KEY and MOONRAKER_URL
+   # Edit .env to set MOONRAKER_URL if you want printer control
    ```
 
 3. Start services:

@@ -13,11 +13,45 @@ from routes_upload import router as upload_router
 from routes_slice import router as slice_router
 
 
+async def _auto_init_filaments():
+    """Auto-initialize default filaments if the library is empty (first run)."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
+        count = await conn.fetchval("SELECT COUNT(*) FROM filaments")
+        if count > 0:
+            return
+
+        print("Filament library empty — initializing starter filaments...")
+        default_filaments = [
+            {"name": "PLA Red", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#FF0000", "extruder_index": 0, "is_default": True, "source_type": "starter"},
+            {"name": "PLA Blue", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#0000FF", "extruder_index": 1, "is_default": False, "source_type": "starter"},
+            {"name": "PLA Green", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#00FF00", "extruder_index": 2, "is_default": False, "source_type": "starter"},
+            {"name": "PLA Yellow", "material": "PLA", "nozzle_temp": 210, "bed_temp": 60, "print_speed": 200, "bed_type": "PEI", "color_hex": "#FFFF00", "extruder_index": 3, "is_default": False, "source_type": "starter"},
+            {"name": "PETG", "material": "PETG", "nozzle_temp": 240, "bed_temp": 80, "print_speed": 150, "bed_type": "PEI", "color_hex": "#FF6600", "extruder_index": 0, "is_default": False, "source_type": "starter"},
+            {"name": "ABS", "material": "ABS", "nozzle_temp": 250, "bed_temp": 100, "print_speed": 150, "bed_type": "Glass", "color_hex": "#333333", "extruder_index": 0, "is_default": False, "source_type": "starter"},
+            {"name": "TPU", "material": "TPU", "nozzle_temp": 220, "bed_temp": 40, "print_speed": 30, "bed_type": "PEI", "color_hex": "#FF00FF", "extruder_index": 0, "is_default": False, "source_type": "starter"},
+        ]
+        for f in default_filaments:
+            try:
+                await conn.execute(
+                    """INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed, bed_type, color_hex, extruder_index, is_default, source_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (name) DO NOTHING""",
+                    f["name"], f["material"], f["nozzle_temp"], f["bed_temp"],
+                    f["print_speed"], f["bed_type"], f["color_hex"], f["extruder_index"], f["is_default"], f["source_type"]
+                )
+            except Exception as e:
+                print(f"Warning: Failed to insert starter filament {f['name']}: {e}")
+        print(f"Initialized {len(default_filaments)} starter filaments")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     await init_moonraker(pool=get_pg_pool())
+    await _auto_init_filaments()
     yield
     # Shutdown
     await close_moonraker()
@@ -26,15 +60,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Configure CORS to allow web UI to access API
-# Override with ALLOWED_ORIGINS env var (comma-separated) for non-localhost deployments
-_default_origins = ["http://localhost:8080", "http://127.0.0.1:8080"]
-_allowed_origins = os.environ.get("ALLOWED_ORIGINS")
-_cors_origins = [o.strip() for o in _allowed_origins.split(",") if o.strip()] if _allowed_origins else _default_origins
+# Configure CORS — default to allow all origins for LAN-first use (no auth).
+# Set ALLOWED_ORIGINS env var (comma-separated) to restrict if needed.
+_allowed_origins_env = os.environ.get("ALLOWED_ORIGINS")
+if _allowed_origins_env:
+    _cors_origins = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+else:
+    _cors_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -164,6 +200,14 @@ async def send_to_printer(body: PrintRequest):
     is_healthy = await client.health_check()
     if not is_healthy:
         raise HTTPException(status_code=503, detail="Printer not reachable")
+
+    # Guard: reject if a print is already running
+    print_status = await client.query_print_status()
+    if print_status.get("state") in ("printing", "paused"):
+        raise HTTPException(
+            status_code=409,
+            detail="A print is already in progress. Cancel it from the Printer Status page first.",
+        )
 
     # Look up the G-code file from the job
     pool = get_pg_pool()

@@ -113,8 +113,8 @@ Use Snapmaker's v2.2.4 fork for Bambu file compatibility.
 ### Preserve plate arrangements
 Never normalize objects - preserve MakerWorld/Bambu layouts.
 
-### LAN-first security
-Secrets encrypted via `APP_SECRET_KEY`.
+### LAN-first
+Designed for local network use, no authentication required.
 
 ### Storage layout
 Under `/data`:
