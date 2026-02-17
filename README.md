@@ -4,6 +4,8 @@
 
 Self-hostable, Docker-first service for Snapmaker U1 3D printing workflow.
 
+> **WARNING — Use at your own risk.** This software is provided as-is with no warranty. It generates G-code that controls a 3D printer with a heated bed and hot end. Incorrect G-code can damage your printer, cause fires, or create other hazards. Always supervise your printer while it is running. The authors accept no responsibility for property damage, injury, or any other consequences arising from the use of this software.
+
 ## Overview
 
 U1 Slicer Bridge provides a complete workflow for 3D printing with the Snapmaker U1:
