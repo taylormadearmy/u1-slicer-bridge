@@ -12,6 +12,7 @@ Docker Compose stack: **api** (Python/FastAPI) + **web** (nginx + Alpine.js) + *
 
 - `apps/api/app/` — Backend: routes, slicer integration, 3MF parsing, profile embedding
 - `apps/web/` — Frontend: single-page app (index.html, app.js, api.js, viewer.js)
+- `apps/web/lib/` — Vendored libraries (Three.js r159, gcode-preview v2.18.0)
 - `test-data/` — 3MF test fixtures with attribution
 
 ## Workflow
@@ -23,6 +24,7 @@ Upload 3MF → validate plate bounds → configure filament/settings → slice w
 Milestone status lives in [AGENTS.md](AGENTS.md) (section: "Milestones Status"). Optional/future milestones with detailed plans:
 
 - **M26 MakerWorld link import** — Detailed feasibility research and implementation plan in `memory/milestone-makerworld-integration.md`
+- **M30 STL upload support** — Trimesh STL→3MF wrapper, single-filament only
 
 ## Critical Conventions
 

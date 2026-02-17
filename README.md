@@ -18,7 +18,7 @@ upload .3mf → validate plate → configure → slice → preview → print
 - Multicolour/multi-extruder slicing (up to 4 extruders)
 - Automatic plate validation (270x270x270mm build volume)
 - Slicing with Snapmaker OrcaSlicer fork (v2.2.4)
-- Interactive 2D G-code preview with layer-by-layer visualization, zoom/pan, and colour legend
+- Interactive 3D G-code preview (gcode-preview + Three.js) with orbit rotation, multi-color rendering, layer slider, and zoom/pan controls
 - 3-way setting modes per parameter (use file defaults / Orca defaults / custom override)
 - Configurable slicing options (wall count, infill, supports, brim, skirt, prime tower)
 - Persistent extruder presets and filament library with JSON profile import/export
@@ -155,7 +155,7 @@ All data is stored under `/data`:
 | M4 | Plate validation - Preserves arrangements |
 | M5 | Direct slicing with filament profiles |
 | M6 | Slicing - Snapmaker OrcaSlicer v2.2.4, Bambu support |
-| M7 | Preview - Interactive 2D layer viewer |
+| M7 | Preview - Interactive G-code layer viewer |
 | M7.1 | Multi-plate support - Detection and visual selection |
 | M7.2 | Build plate type & temperature overrides |
 | M8 | Print control - Send to printer, pause/resume/cancel via Moonraker |
@@ -163,7 +163,8 @@ All data is stored under `/data`:
 | M10 | File deletion - Delete old uploads and sliced files |
 | M11 | Multifilament support - Colour detection, auto-assignment, override |
 | M13 | Custom filament profiles - JSON import/export with slicer settings passthrough |
-| M15 | Multicolour viewer - Colour legend in 2D viewer |
+| M12 | 3D G-code viewer - gcode-preview + Three.js (orbit, multi-color, arc support) |
+| M15 | Multicolour viewer - Colour legend in viewer |
 | M16 | Flexible filament assignment - Override colour per extruder |
 | M17 | Prime tower options - Configurable prime tower settings |
 | M18 | Multi-plate visual selection - Plate names and preview images |
@@ -181,12 +182,12 @@ All data is stored under `/data`:
 
 | ID | Feature |
 |----|---------|
-| M12 | 3D G-code viewer |
 | M14 | Multi-machine support |
 | M19 | Slicer selection (OrcaSlicer vs Snapmaker Orca) |
 | M26 | MakerWorld link import - Paste URL to auto-download 3MF |
+| M30 | STL upload support - Wrap STL in 3MF via trimesh for slicing |
 
-**Progress:** 27.7 / 30 milestones complete (92%)
+**Progress:** 28.7 / 30 milestones complete (96%)
 
 ## Non-Goals (v1)
 

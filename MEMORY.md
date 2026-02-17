@@ -2,6 +2,19 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
+## 3D G-code Viewer (M12) — 2026-02-17
+
+### Implementation
+- Replaced 2D canvas viewer with gcode-preview v2.18.0 + Three.js r159 (vendored in `apps/web/lib/`)
+- Alpine.js component wraps gcode-preview; Three.js objects stored in closure (NOT Alpine properties — Proxy breaks non-configurable props)
+- Full G-code fetched via `/api/jobs/{id}/download`, parsed client-side by gcode-preview
+- Mouse controls match OrcaSlicer: left=rotate, middle/right=pan, scroll=zoom
+
+### Key Bugs Fixed
+1. **TIMELAPSE tool color bug** — `TIMELAPSE_START`/`TIMELAPSE_TAKE_FRAME` parsed as `gcode="t"`, misidentified as tool changes → `state.t=undefined` → hotpink fallback. Fix: comment out with regex before processGCode.
+2. **Black rendered as white** — Gradient replaces lightness (0.1-0.8), black (S=0) becomes gray/white. Fix: `disableGradient: true`.
+3. **Auto filament colors ignoring presets** — `mappedColors` from `mapDetectedColorsToPresetSlots()` was unused; `syncFilamentColors()` used wrong preset index. Fix: use `mappedFromPresets.mappedColors` and `assignments[idx]`.
+
 ## Recent Fixes (2026-02-16)
 
 ### Filament Loading Race Condition

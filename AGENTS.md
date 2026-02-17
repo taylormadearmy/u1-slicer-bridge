@@ -45,13 +45,13 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Multi-Plate & Multicolour Workflow
 ✅ M7.1 multi-plate support - Multi-plate 3MF detection and selection UI  
 ✅ M11 multifilament support - Color detection from 3MF, auto-assignment, manual override, multi-extruder slicing  
-✅ M15 multicolour viewer - Show color legend in 2D viewer with all detected/assigned colors  
+✅ M15 multicolour viewer - Show color legend in viewer with all detected/assigned colors  
 ✅ M16 flexible filament assignment - Allow overriding color per extruder (separate material type from color)
 ✅ M17 prime tower options - Add configurable prime tower options for multicolour prints
 ✅ M18 multi-plate visual selection - Show plate names and preview images when selecting plates
 
 ### Preview & UX
-✅ M7 preview - Interactive 2D layer viewer
+✅ M7 preview - Interactive G-code layer viewer (superseded by M12 3D viewer)
 ✅ M12 3D G-code viewer - Interactive 3D preview using gcode-preview + Three.js (orbit rotation, multi-color, arc support, build volume)
 ✅ M20 G-code viewer zoom - Zoom in/out buttons, scroll-wheel zoom toward cursor, click-drag pan, fit-to-bed reset
 ✅ M21 upload/configure loading UX - Progress indicators during upload preparation
@@ -173,15 +173,18 @@ Avoid:
 4. If tests fail, fix and re-run — do not leave failing tests
 
 **After making changes, offer the user a choice:**
-- "I can run the **targeted tests** (`npm run test:<suite>`) for a quick check, or the **full suite** (`npm test`, ~12 min). Which do you prefer?"
-- For very targeted changes (1-2 files, clear scope), default to running targeted tests unless the user asks for full suite.
-- For broad changes (multiple files, API + frontend, refactors), recommend running the full suite.
+- "I can run the **fast regression** (`npm run test:fast`, ~5 min, 84 tests incl. 1 slice sanity), **targeted tests** (`npm run test:<suite>`), or the **full suite** (`npm test`, ~60 min). Which do you prefer?"
+- For very targeted changes (1-2 files, clear scope), default to running targeted tests or `test:fast`.
+- For broad changes (multiple files, API + frontend, refactors), recommend `test:fast` or full suite.
 
 ```bash
+# Fast regression (84 tests incl. calicube slice sanity, ~5 min)
+npm run test:fast
+
 # Quick smoke tests (always run, ~15 seconds, no slicer needed)
 npm run test:smoke
 
-# Run all tests (requires Docker services running with slicer)
+# Run all tests (requires Docker services running with slicer, ~60 min)
 npm test
 ```
 
@@ -743,7 +746,8 @@ All tests use Playwright and live in `tests/`. Config is in `playwright.config.t
 **Prerequisites:** Docker services running, `npm install`, `npx playwright install chromium`.
 
 ```bash
-npm test                       # Run ALL tests (122 tests, ~15 min)
+npm run test:fast              # Fast regression (84 tests, ~5 min, incl. slice sanity)
+npm test                       # Run ALL tests (122 tests, ~60 min)
 npm run test:smoke             # Quick smoke tests (~15s, no slicer needed)
 npm run test:upload            # Upload workflow
 npm run test:slice             # Slicing end-to-end (slow, needs slicer)
@@ -764,6 +768,8 @@ npm run test:report            # View HTML test report
 
 ```
 tests/
+  global-setup.ts           Records baseline upload ID before tests
+  global-teardown.ts        Cleans up test-created uploads after all tests
   helpers.ts                Shared utilities (waitForApp, uploadFile, fixture, etc.)
   smoke.spec.ts             Page load, Alpine.js init, header, API health
   api.spec.ts               API endpoint availability and response shapes
@@ -836,4 +842,4 @@ When implementing a new feature or fixing a bug:
 2. If the feature opens a new area (e.g., print control), create a new spec file.
 3. Every bug fix should include a test that would have caught the bug.
 4. After changes, deploy to Docker and run at least the targeted test suite.
-5. Offer the user a choice: targeted tests (fast) or full suite (~12 min).
+5. Offer the user a choice: `test:fast` (~5 min), targeted tests, or full suite (~60 min).

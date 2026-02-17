@@ -42,6 +42,8 @@ npm run test:report
 
 ```
 tests/
+  global-setup.ts           Records baseline upload ID before tests
+  global-teardown.ts        Cleans up test-created uploads after all tests
   helpers.ts                Shared utilities (waitForApp, uploadFile, fixture, etc.)
   smoke.spec.ts             Page load, Alpine.js init, header, API health
   api.spec.ts               API endpoint availability and response shapes
@@ -50,7 +52,7 @@ tests/
   slicing.spec.ts           Slice end-to-end (configure → slice → complete)
   slice-overrides.spec.ts   Slicing setting overrides (temps, walls, infill, prime tower)
   slice-plate.spec.ts       Individual plate slicing endpoint
-  viewer.spec.ts            G-code viewer canvas, controls, metadata
+  viewer.spec.ts            3D G-code viewer, controls, metadata API
   multiplate.spec.ts        Multi-plate detection, plate cards, selection
   multicolour.spec.ts       Colour detection, overrides, >4 colour guard
   multicolour-slice.spec.ts Multi-colour slicing workflow
@@ -94,7 +96,7 @@ Test 3MF files live in `test-data/`:
 | slice-overrides | Slow | Yes | Setting overrides (temps, walls, infill, prime tower) |
 | slice-plate | Slow | Yes | Individual plate slicing |
 | multicolour-slice | Slow | Yes | Multi-colour slicing workflow |
-| viewer | Slow | Yes | Canvas rendering, layer controls, API |
+| viewer | Slow | Yes | 3D viewer (WebGL), layer controls, API |
 
 *file-management deletes test data created during the test
 
@@ -109,7 +111,7 @@ Before submitting changes, verify these still work:
 1. **Upload** - Upload a .3mf file, appears in Recent Uploads
 2. **Configure** - Click upload, reaches Configure step with filament selection
 3. **Slice** - Slice completes, G-code generated
-4. **Preview** - View G-code in 2D layer viewer, download works
+4. **Preview** - View G-code in 3D viewer (rotate, zoom, pan), download works
 5. **File management** - Checkboxes, shift-click range select, delete single/multiple files
 6. **Multi-plate** - Upload multi-plate file, see plate cards with previews, select and slice one plate
 7. **Multicolour** - Upload multi-colour file, see detected colours, override colours, slice
