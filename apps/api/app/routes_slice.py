@@ -139,6 +139,7 @@ class SliceRequest(BaseModel):
     nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
     bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
+    enable_flow_calibrate: Optional[bool] = True
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
 
@@ -169,6 +170,7 @@ class SlicePlateRequest(BaseModel):
     nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
     bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
+    enable_flow_calibrate: Optional[bool] = True
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
 
@@ -539,6 +541,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 precomputed_is_bambu=file_meta["is_bambu"],
                 precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
                 precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -1050,6 +1053,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 precomputed_is_bambu=file_meta["is_bambu"],
                 precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
                 precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")

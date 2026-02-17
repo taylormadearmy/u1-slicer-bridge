@@ -128,7 +128,11 @@ class MoonrakerClient:
             params={
                 "print_stats": "",
                 "virtual_sdcard": "",
+                "toolhead": "",
                 "extruder": "",
+                "extruder1": "",
+                "extruder2": "",
+                "extruder3": "",
                 "heater_bed": "",
             },
         )
@@ -137,8 +141,25 @@ class MoonrakerClient:
 
         print_stats = data.get("print_stats", {})
         virtual_sdcard = data.get("virtual_sdcard", {})
-        extruder = data.get("extruder", {})
         heater_bed = data.get("heater_bed", {})
+
+        # Active extruder from toolhead
+        active_extruder_name = data.get("toolhead", {}).get("extruder", "extruder")
+
+        # All 4 extruder temperatures
+        extruders = []
+        for name in ["extruder", "extruder1", "extruder2", "extruder3"]:
+            ext = data.get(name, {})
+            if ext:
+                extruders.append({
+                    "temp": ext.get("temperature", 0.0),
+                    "target": ext.get("target", 0.0),
+                    "active": name == active_extruder_name,
+                })
+            else:
+                extruders.append({"temp": 0.0, "target": 0.0, "active": False})
+
+        active_extruder = data.get(active_extruder_name, data.get("extruder", {}))
 
         return {
             "state": print_stats.get("state", "standby"),
@@ -146,10 +167,11 @@ class MoonrakerClient:
             "filename": print_stats.get("filename"),
             "duration": print_stats.get("print_duration", 0.0),
             "filament_used": print_stats.get("filament_used", 0.0),
-            "nozzle_temp": extruder.get("temperature", 0.0),
-            "nozzle_target": extruder.get("target", 0.0),
+            "nozzle_temp": active_extruder.get("temperature", 0.0),
+            "nozzle_target": active_extruder.get("target", 0.0),
             "bed_temp": heater_bed.get("temperature", 0.0),
             "bed_target": heater_bed.get("target", 0.0),
+            "extruders": extruders,
         }
 
 

@@ -108,6 +108,7 @@ function app() {
             prime_tower_brim_width: null,
             prime_tower_brim_chamfer: true,
             prime_tower_brim_chamfer_max_width: null,
+            enable_flow_calibrate: true,
             bed_temp: null,
             bed_type: null,
         },
@@ -132,6 +133,7 @@ function app() {
             prime_tower_brim_width: null,
             prime_tower_brim_chamfer: true,
             prime_tower_brim_chamfer_max_width: null,
+            enable_flow_calibrate: true,
             nozzle_temp: null,
             bed_temp: null,
             bed_type: null,
@@ -287,6 +289,7 @@ function app() {
                         prime_tower_brim_width: this.machineSettings.prime_tower_brim_width,
                         prime_tower_brim_chamfer: this.machineSettings.prime_tower_brim_chamfer,
                         prime_tower_brim_chamfer_max_width: this.machineSettings.prime_tower_brim_chamfer_max_width,
+                        enable_flow_calibrate: this.machineSettings.enable_flow_calibrate,
                         bed_temp: this.machineSettings.bed_temp,
                         bed_type: this.machineSettings.bed_type,
                         setting_modes: this.settingModes,
@@ -358,6 +361,9 @@ function app() {
                     s[key] = this.orcaDefaults[key] ?? null;
                 }
             }
+            // Machine-level toggles (not 3-way mode)
+            s.enable_flow_calibrate = this.machineSettings.enable_flow_calibrate;
+
             this.sliceSettings = {
                 ...this.sliceSettings,
                 ...s,

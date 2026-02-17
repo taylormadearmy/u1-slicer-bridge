@@ -349,6 +349,7 @@ class SlicingDefaults(BaseModel):
     prime_tower_brim_width: Optional[int] = None
     prime_tower_brim_chamfer: bool = True
     prime_tower_brim_chamfer_max_width: Optional[int] = None
+    enable_flow_calibrate: bool = True
     nozzle_temp: Optional[int] = None
     bed_temp: Optional[int] = None
     bed_type: Optional[str] = None
@@ -412,6 +413,7 @@ async def _ensure_preset_rows(conn):
     await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_distance REAL")
     await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS skirt_height INTEGER")
     await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS setting_modes TEXT")
+    await conn.execute("ALTER TABLE slicing_defaults ADD COLUMN IF NOT EXISTS enable_flow_calibrate BOOLEAN NOT NULL DEFAULT TRUE")
 
     for slot in range(1, 5):
         fallback_filament_id = await conn.fetchval(
@@ -504,6 +506,7 @@ async def get_extruder_presets():
             SELECT layer_height, infill_density, wall_count, infill_pattern,
                    supports, enable_prime_tower, prime_volume, prime_tower_width, prime_tower_brim_width,
                    prime_tower_brim_chamfer, prime_tower_brim_chamfer_max_width,
+                   enable_flow_calibrate,
                    nozzle_temp, bed_temp, bed_type,
                    support_type, support_threshold_angle,
                    brim_type, brim_width, brim_object_gap,
@@ -550,6 +553,7 @@ async def get_extruder_presets():
             "prime_tower_brim_width": defaults["prime_tower_brim_width"],
             "prime_tower_brim_chamfer": defaults["prime_tower_brim_chamfer"],
             "prime_tower_brim_chamfer_max_width": defaults["prime_tower_brim_chamfer_max_width"],
+            "enable_flow_calibrate": defaults["enable_flow_calibrate"],
             "nozzle_temp": defaults["nozzle_temp"],
             "bed_temp": defaults["bed_temp"],
             "bed_type": defaults["bed_type"],
@@ -613,9 +617,10 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                     skirt_loops, skirt_distance, skirt_height,
                     enable_prime_tower, prime_volume, prime_tower_width, prime_tower_brim_width,
                     prime_tower_brim_chamfer, prime_tower_brim_chamfer_max_width,
+                    enable_flow_calibrate,
                     nozzle_temp, bed_temp, bed_type, setting_modes, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     layer_height = EXCLUDED.layer_height,
                     infill_density = EXCLUDED.infill_density,
@@ -636,6 +641,7 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                     prime_tower_brim_width = EXCLUDED.prime_tower_brim_width,
                     prime_tower_brim_chamfer = EXCLUDED.prime_tower_brim_chamfer,
                     prime_tower_brim_chamfer_max_width = EXCLUDED.prime_tower_brim_chamfer_max_width,
+                    enable_flow_calibrate = EXCLUDED.enable_flow_calibrate,
                     nozzle_temp = EXCLUDED.nozzle_temp,
                     bed_temp = EXCLUDED.bed_temp,
                     bed_type = EXCLUDED.bed_type,
@@ -662,6 +668,7 @@ async def update_extruder_presets(payload: ExtruderPresetUpdate):
                 d.prime_tower_brim_width,
                 d.prime_tower_brim_chamfer,
                 d.prime_tower_brim_chamfer_max_width,
+                d.enable_flow_calibrate,
                 d.nozzle_temp,
                 d.bed_temp,
                 d.bed_type,

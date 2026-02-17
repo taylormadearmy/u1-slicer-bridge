@@ -6,6 +6,7 @@ Handles Bambu Studio files by extracting clean geometry with trimesh.
 
 import asyncio
 import json
+import re
 import uuid
 import zipfile
 import shutil
@@ -367,6 +368,29 @@ class ProfileEmbedder:
         )
         return config
 
+    @staticmethod
+    def _strip_flow_calibrate(gcode: str) -> str:
+        """Remove SM_PRINT_FLOW_CALIBRATE blocks from machine_start_gcode.
+
+        Each block is wrapped in {if (is_extruder_used[N])}...{endif} conditionals.
+        Also removes the section comment header.
+        """
+        # Remove each {if}...SM_PRINT_FLOW_CALIBRATE...{endif} block
+        gcode = re.sub(
+            r'\{if \(is_extruder_used\[\d+\]\)\}\n'
+            r'SM_PRINT_FLOW_CALIBRATE[^\n]*\n'
+            r'\{endif\}\n?',
+            '',
+            gcode,
+        )
+        # Remove the section comment header
+        gcode = re.sub(
+            r';=+ 挤出流量\s+=+\n',
+            '',
+            gcode,
+        )
+        return gcode
+
     def embed_profiles(self,
                        source_3mf: Path,
                        output_3mf: Path,
@@ -377,7 +401,8 @@ class ProfileEmbedder:
                        preserve_geometry: bool = False,
                        precomputed_is_bambu: Optional[bool] = None,
                        precomputed_has_multi_assignments: Optional[bool] = None,
-                       precomputed_has_layer_changes: Optional[bool] = None) -> Path:
+                       precomputed_has_layer_changes: Optional[bool] = None,
+                       enable_flow_calibrate: bool = True) -> Path:
         """Copy original 3MF and inject Orca profiles.
 
         Preserves all original geometry, transforms, and positioning.
@@ -431,6 +456,9 @@ class ProfileEmbedder:
                     overrides=overrides,
                     requested_filament_count=requested_filament_count,
                 )
+                if not enable_flow_calibrate and 'machine_start_gcode' in config:
+                    config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])
+                    logger.info("Stripped SM_PRINT_FLOW_CALIBRATE blocks (flow calibration disabled)")
                 settings_json = json.dumps(config, indent=2)
                 self._copy_and_inject_settings(
                     source_3mf,
@@ -466,6 +494,10 @@ class ProfileEmbedder:
                 config['enable_arc_fitting'] = '1'
 
             logger.debug(f"Merged config with {len(config)} keys")
+
+            if not enable_flow_calibrate and 'machine_start_gcode' in config:
+                config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])
+                logger.info("Stripped SM_PRINT_FLOW_CALIBRATE blocks (flow calibration disabled)")
 
             # Create JSON settings
             settings_json = json.dumps(config, indent=2)

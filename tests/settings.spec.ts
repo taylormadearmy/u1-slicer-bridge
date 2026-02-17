@@ -29,6 +29,17 @@ test.describe('Settings Modal', () => {
     await expect(page.getByRole('button', { name: /Save as Defaults/i })).not.toBeVisible();
   });
 
+  test('Flow Calibration checkbox is visible in Machine Behavior section', async ({ page }) => {
+    // Scroll to the Machine Behavior section
+    const label = page.locator('label[for="settings-flow-calibrate"]');
+    await label.scrollIntoViewIfNeeded();
+    await expect(label).toBeVisible();
+    await expect(label).toHaveText('Flow Calibration');
+    // Checkbox should default to checked
+    const checkbox = page.locator('#settings-flow-calibrate');
+    await expect(checkbox).toBeChecked();
+  });
+
   test('filament library shows entries', async ({ page }) => {
     const filaments = await getAppState(page, 'filaments') as any[];
     if (filaments.length > 0) {
@@ -593,6 +604,40 @@ test.describe('Settings Auto-Save', () => {
       expect(presets2.slicing_defaults.wall_count).toBe(newWallCount);
     } finally {
       // Always restore original presets
+      await request.put(`${API}/presets/extruders`, {
+        data: {
+          extruders: originalPresets.extruders,
+          slicing_defaults: originalPresets.slicing_defaults,
+        },
+      });
+    }
+  });
+
+  test('enable_flow_calibrate persists across save/load', async ({ request }) => {
+    const getRes = await request.get(`${API}/presets/extruders`);
+    expect(getRes.ok()).toBe(true);
+    const originalPresets = await getRes.json();
+    try {
+      // Default should be true
+      expect(originalPresets.slicing_defaults.enable_flow_calibrate).toBe(true);
+
+      // Save with flow calibrate disabled
+      const saveRes = await request.put(`${API}/presets/extruders`, {
+        data: {
+          extruders: originalPresets.extruders,
+          slicing_defaults: {
+            ...originalPresets.slicing_defaults,
+            enable_flow_calibrate: false,
+          },
+        },
+      });
+      expect(saveRes.ok()).toBe(true);
+
+      // Verify it persisted
+      const getRes2 = await request.get(`${API}/presets/extruders`);
+      const presets2 = await getRes2.json();
+      expect(presets2.slicing_defaults.enable_flow_calibrate).toBe(false);
+    } finally {
       await request.put(`${API}/presets/extruders`, {
         data: {
           extruders: originalPresets.extruders,

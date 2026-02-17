@@ -146,6 +146,25 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
     expect(job.status).toBe('completed');
   });
 
+  test('slice with flow calibrate disabled succeeds', async ({ request }) => {
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+    const ids = await getTwoFilamentIds(request);
+
+    const res = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+      data: {
+        filament_ids: ids,
+        layer_height: 0.2,
+        infill_density: 15,
+        supports: false,
+        enable_flow_calibrate: false,
+      },
+      timeout: 120_000,
+    });
+    expect(res.ok()).toBe(true);
+    const job = await waitForJobComplete(request, await res.json());
+    expect(job.status).toBe('completed');
+  });
+
   test('presets API round-trips prime tower settings', async ({ request }) => {
     // Get current presets
     const getRes = await request.get(`${API}/presets/extruders`, { timeout: 30_000 });
