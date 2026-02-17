@@ -25,7 +25,7 @@
     "url": "git+https://github.com/taylormadearmy/u1-slicer-bridge.git"
   },
   "author": "taylormadearmy",
-  "license": "ISC",
+  "license": "AGPL-3.0-only",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/taylormadearmy/u1-slicer-bridge/issues"
