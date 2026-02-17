@@ -11,11 +11,11 @@ Self-hostable, Docker-first service for Snapmaker U1 3D printing workflow.
 U1 Slicer Bridge provides a complete workflow for 3D printing with the Snapmaker U1:
 
 ```
-upload .3mf → validate plate → configure → slice → preview → print
+upload .3mf/.stl → validate plate → configure → slice → preview → print
 ```
 
 **Key Features:**
-- Upload `.3mf` files (including MakerWorld/Bambu Studio and PrusaSlicer exports)
+- Upload `.3mf` and `.stl` files (including MakerWorld/Bambu Studio and PrusaSlicer exports)
 - Multi-plate 3MF support with per-plate validation and visual selection
 - Multicolour/multi-extruder slicing (up to 4 extruders)
 - Automatic plate validation (270x270x270mm build volume)
@@ -194,6 +194,7 @@ All data is stored under `/data`:
 | M28 | Printer status page - Always-accessible status overlay with live monitoring |
 | M27 | Concurrency hardening - UUID temp files, slicer process semaphore |
 | M29 | 3-way setting modes - Per-setting model/orca/override with file detection |
+| M30 | STL upload support - Wrap STL in 3MF via trimesh for slicing |
 
 ### Not Yet Implemented
 
@@ -202,9 +203,8 @@ All data is stored under `/data`:
 | M14 | Multi-machine support |
 | M19 | Slicer selection (OrcaSlicer vs Snapmaker Orca) |
 | M26 | MakerWorld link import - Paste URL to auto-download 3MF |
-| M30 | STL upload support - Wrap STL in 3MF via trimesh for slicing |
 
-**Progress:** 28.7 / 30 milestones complete (96%)
+**Progress:** 29.7 / 30 milestones complete (99%)
 
 ## Non-Goals (v1)
 

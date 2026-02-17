@@ -73,9 +73,9 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
 ❌ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info/profiles and auto-download 3MF into upload pipeline. Feasibility researched; plan in `memory/milestone-makerworld-integration.md`
-❌ M30 STL upload support - Accept .stl files via trimesh STL→3MF wrapper. Single-filament only (no multi-plate, no color detection, no embedded print settings). OrcaSlicer slices the wrapped 3MF as normal.
+✅ M30 STL upload support - Accept .stl files via trimesh STL→3MF wrapper. Single-filament only (no multi-plate, no color detection, no embedded print settings). OrcaSlicer slices the wrapped 3MF as normal.
 
-**Current:** 28.7 / 30 complete (96%)
+**Current:** 29.7 / 30 complete (99%)
 
 ---
 
