@@ -313,27 +313,15 @@ function app() {
 
         /**
          * Apply preset defaults to active filament selections.
+         *
+         * Only sets selectedFilament (single-filament default).
+         * selectedFilaments (multicolor) is exclusively managed by
+         * applyDetectedColors() based on the actual uploaded file.
          */
         applyPresetDefaults() {
             const e1 = this.extruderPresets[0];
             if (e1 && e1.filament_id) {
                 this.selectedFilament = e1.filament_id;
-            }
-
-            // Only set selectedFilaments from presets if no file is loaded yet.
-            // A file upload's applyDetectedColors() determines the correct
-            // filament mode — overwriting it here causes race conditions.
-            if (!this.selectedUpload) {
-                const presetFilaments = this.extruderPresets
-                    .map((p) => p.filament_id)
-                    .filter((id) => !!id)
-                    .slice(0, this.maxExtruders);
-                if (presetFilaments.length > 0) {
-                    this.selectedFilaments = presetFilaments;
-                }
-
-                this.syncFilamentColors();
-                this.sliceSettings.extruder_assignments = [0, 1, 2, 3];
             }
         },
 
