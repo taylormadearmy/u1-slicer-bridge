@@ -84,7 +84,7 @@ app.include_router(slice_router)
 def root():
     return {
         "name": "U1 Slicer Bridge API",
-        "version": "1.0.0",
+        "version": os.getenv("APP_VERSION", "dev"),
         "web_ui": "http://localhost:8080",
         "endpoints": {
             "health": "/healthz",
@@ -105,7 +105,7 @@ def root():
 
 @app.get("/healthz")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": os.getenv("APP_VERSION", "dev")}
 
 
 @app.get("/printer/status")

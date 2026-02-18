@@ -731,69 +731,60 @@
 
             <!-- Step 4: Complete (Results) -->
             <div x-show="currentStep === 'complete'" x-cloak>
-                <section class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
-                    <div class="mb-6">
-                        <div class="flex items-center gap-3 mb-4">
-                            <button @click="goBackToConfigure()"
-                                    class="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition flex-shrink-0"
-                                    title="Back to configure">
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
-                                </svg>
-                            </button>
-                            <h2 class="text-2xl font-bold text-gray-900">Your G-code is Ready!</h2>
-                        </div>
-                        <div class="text-center">
-                            <div class="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
-                                <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                                </svg>
-                            </div>
-                            <p class="text-sm text-gray-500" x-text="selectedUpload?.filename"></p>
-                        </div>
+                <section class="bg-white rounded-lg shadow-sm p-3 md:p-4 mb-4">
+                    <!-- Filename row -->
+                    <div class="flex items-center gap-2 mb-3">
+                        <button @click="goBackToConfigure()"
+                                class="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition flex-shrink-0"
+                                title="Back to configure">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+                            </svg>
+                        </button>
+                        <p class="text-sm font-medium text-gray-700 truncate" x-text="selectedUpload?.filename"></p>
                     </div>
 
-                    <!-- Print Summary -->
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                        <div class="text-center p-4 bg-gray-50 rounded-lg">
-                            <p class="text-2xl font-bold text-gray-900" x-text="formatTime(sliceResult?.metadata?.estimated_time_seconds || 0)"></p>
-                            <p class="text-xs text-gray-600 mt-1">Estimated Time</p>
+                    <!-- Compact Print Summary -->
+                    <div class="grid grid-cols-4 gap-2 mb-3">
+                        <div class="text-center p-2 bg-gray-50 rounded">
+                            <p class="text-sm font-bold text-gray-900" x-text="formatTime(sliceResult?.metadata?.estimated_time_seconds || 0)"></p>
+                            <p class="text-[10px] text-gray-500">Time</p>
                         </div>
-                        <div class="text-center p-4 bg-gray-50 rounded-lg">
-                            <p class="text-2xl font-bold text-gray-900" x-text="formatFilamentWeight(sliceResult?.metadata?.filament_used_g) || formatFilament(sliceResult?.metadata?.filament_used_mm || 0)"></p>
+                        <div class="text-center p-2 bg-gray-50 rounded">
+                            <p class="text-sm font-bold text-gray-900" x-text="formatFilamentWeight(sliceResult?.metadata?.filament_used_g) || formatFilament(sliceResult?.metadata?.filament_used_mm || 0)"></p>
                             <template x-if="sliceResult?.metadata?.filament_used_g?.length > 1">
-                                <div class="flex flex-wrap justify-center gap-1.5 mt-1.5">
+                                <div class="flex flex-wrap justify-center gap-1 mt-1">
                                     <template x-for="(g, i) in sliceResult.metadata.filament_used_g" :key="i">
-                                        <span x-show="g > 0" class="inline-flex items-center gap-1 text-[10px] text-gray-500">
-                                            <span class="w-3 h-3 rounded-full inline-block border border-gray-300" :style="`background:${sliceResult?.detected_colors?.[i] || sliceResult?.filament_colors?.[i] || '#999'}`"></span>
+                                        <span x-show="g > 0" class="inline-flex items-center gap-0.5 text-[9px] text-gray-500">
+                                            <span class="w-2.5 h-2.5 rounded-full inline-block border border-gray-300" :style="`background:${sliceResult?.detected_colors?.[i] || sliceResult?.filament_colors?.[i] || '#999'}`"></span>
                                             <span x-text="g.toFixed(1) + 'g'"></span>
                                         </span>
                                     </template>
                                 </div>
                             </template>
-                            <p class="text-xs text-gray-600 mt-1">Filament Used</p>
+                            <p class="text-[10px] text-gray-500">Filament</p>
                         </div>
-                        <div class="text-center p-4 bg-gray-50 rounded-lg">
-                            <p class="text-2xl font-bold text-gray-900" x-text="sliceResult?.metadata?.layer_count || 0"></p>
-                            <p class="text-xs text-gray-600 mt-1">Layers</p>
+                        <div class="text-center p-2 bg-gray-50 rounded">
+                            <p class="text-sm font-bold text-gray-900" x-text="sliceResult?.metadata?.layer_count || 0"></p>
+                            <p class="text-[10px] text-gray-500">Layers</p>
                         </div>
-                        <div class="text-center p-4 bg-gray-50 rounded-lg">
-                            <p class="text-2xl font-bold text-gray-900" x-text="sliceResult?.gcode_size_mb?.toFixed(1) + ' MB'"></p>
-                            <p class="text-xs text-gray-600 mt-1">File Size</p>
+                        <div class="text-center p-2 bg-gray-50 rounded">
+                            <p class="text-sm font-bold text-gray-900" x-text="sliceResult?.gcode_size_mb?.toFixed(1) + ' MB'"></p>
+                            <p class="text-[10px] text-gray-500">Size</p>
                         </div>
                     </div>
 
                     <!-- Action Buttons -->
-                    <div class="flex flex-wrap gap-4">
+                    <div class="flex flex-wrap gap-3">
                         <a :href="`/api/jobs/${sliceResult?.job_id}/download`" download
-                           class="flex-1 px-6 py-3 bg-green-600 text-white text-center rounded-lg hover:bg-green-700 transition">
+                           class="flex-1 px-4 py-2 bg-green-600 text-white text-center text-sm rounded-lg hover:bg-green-700 transition">
                             Download G-code
                         </a>
                         <button x-show="printerConnected"
                                 @click="sendToPrinter()"
                                 :disabled="printSending || printerBusy"
                                 :title="printerBusy ? 'A print is in progress — cancel it from the Printer Status page first' : ''"
-                                class="px-6 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition flex items-center gap-2">
+                                class="px-4 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 disabled:bg-gray-400 disabled:cursor-not-allowed transition flex items-center gap-2">
                             <svg x-show="printSending" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
@@ -1480,6 +1471,9 @@
                 </template>
             </div>
         </section>
+                <div x-show="appVersion" class="bg-white rounded-b-lg px-6 py-3 text-center border-t border-gray-100">
+                    <span class="text-[11px] text-gray-400" x-text="'U1 Slicer Bridge ' + appVersion"></span>
+                </div>
             </div><!-- end modal content container -->
         </div><!-- end modal overlay -->
 

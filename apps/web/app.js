@@ -22,6 +22,9 @@ function app() {
         confirmModal: { open: false, title: '', message: '', html: '', confirmText: 'OK', destructive: false, suppressKey: null, suppressChecked: false },
         _confirmResolve: null,
 
+        // App version (fetched from API)
+        appVersion: '',
+
         // Data
         uploads: [],
         uploadsTotal: 0,
@@ -160,6 +163,7 @@ function app() {
 
             // Load initial data — printer check runs in parallel so it
             // doesn't block file lists when Moonraker is slow/unreachable.
+            this.fetchVersion(); // non-blocking
             this.loadOrcaDefaults(); // non-blocking
             this.loadPrinterSettings(); // non-blocking, pre-load for settings modal
             this.checkPrinterStatus(); // non-blocking — updates header indicator async
@@ -195,6 +199,14 @@ function app() {
                 this.printerStatus = 'Error';
                 console.error('Failed to check printer status:', err);
             }
+        },
+
+        async fetchVersion() {
+            try {
+                const res = await fetch('/api/healthz');
+                const data = await res.json();
+                if (data.version) this.appVersion = data.version;
+            } catch (e) { /* non-critical */ }
         },
 
         /**

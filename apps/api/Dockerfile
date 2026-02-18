@@ -69,4 +69,8 @@ RUN cp "/opt/orca-slicer/resources/profiles/Anycubic/process/fdm_process_common.
        "/root/.config/OrcaSlicer/user/filament/"
 
 COPY app /app
+
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
+
 CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000"]

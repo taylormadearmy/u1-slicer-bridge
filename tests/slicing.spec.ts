@@ -30,7 +30,7 @@ test.describe('Slicing Workflow', () => {
     await waitForSliceComplete(page);
 
     // Verify complete step
-    await expect(page.getByRole('heading', { name: /G-code is Ready/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /G-code Ready/i })).toBeVisible();
   });
 
   test('completed slice shows metadata', async ({ page }) => {
@@ -40,12 +40,12 @@ test.describe('Slicing Workflow', () => {
 
     // Should show summary info in the complete step
     // Scope to the visible complete section to avoid matching sliced-files list items
-    const heading = page.getByRole('heading', { name: /G-code is Ready/i });
+    const heading = page.getByRole('heading', { name: /G-code Ready/i });
     await expect(heading).toBeVisible();
     // The summary stats are siblings near the heading — check via the visible step
-    await expect(page.getByText('Estimated Time', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Time', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('Layers', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText('File Size', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Size', { exact: true }).first()).toBeVisible();
   });
 
   test('completed slice has download link', async ({ page }) => {
@@ -93,7 +93,7 @@ test.describe('Slicing Workflow', () => {
     await waitForSliceComplete(page);
 
     // Verify we're on the complete step
-    await expect(page.getByRole('heading', { name: /G-code is Ready/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /G-code Ready/i })).toBeVisible();
 
     // Check sliceResult.filament_colors in Alpine state — should not be all #FFFFFF
     const filamentColors = await getAppState(page, 'sliceResult').then(
@@ -165,6 +165,6 @@ test.describe('Slicing Workflow', () => {
     // Slice via UI — exercises the full browser filament selection path
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);
-    await expect(page.getByRole('heading', { name: /G-code is Ready/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /G-code Ready/i })).toBeVisible();
   });
 });
