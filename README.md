@@ -69,7 +69,6 @@ See **[DEPLOY.md](DEPLOY.md)** for the full deployment guide.
 | Service | Path | Description |
 |---------|------|-------------|
 | API | `apps/api/` | FastAPI backend - upload, parse, slice, job management |
-| Worker | `apps/worker/` | Background processing for heavy tasks |
 | Web | `apps/web/` | Nginx + static frontend (Alpine.js) |
 | PostgreSQL | via compose | Persistent storage for uploads, jobs, filaments, presets |
 

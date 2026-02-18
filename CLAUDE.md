@@ -9,7 +9,7 @@
 
 ## Architecture (quick reference)
 
-Docker Compose stack: **api** (Python/FastAPI) + **web** (nginx + Alpine.js) + **postgres** + **redis**
+Docker Compose stack: **api** (Python/FastAPI) + **web** (nginx + Alpine.js) + **postgres**
 
 - `apps/api/app/` — Backend: routes, slicer integration, 3MF parsing, profile embedding
 - `apps/web/` — Frontend: single-page app (index.html, app.js, api.js, viewer.js)

@@ -131,7 +131,6 @@ Prefer:
 - small safe steps
 - minimal moving parts
 - explicit over magic
-- worker for heavy tasks
 - **always run regression tests after code changes** (deploy first, then test)
 - offer targeted vs full test suite choice to the user
 
@@ -149,7 +148,7 @@ After pushing commits, **always ask the user if they want to tag a release** to 
 git tag v1.x.x && git push origin v1.x.x
 ```
 
-This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web,worker}` with semver + `latest` tags. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
+This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web}` with semver + `latest` tags. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
 
 ### Third-Party License Attribution
 

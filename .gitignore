@@ -68,6 +68,7 @@ docker-compose.override.yml
 uploads/
 temp/
 *.tmp
+tmp_*
 *.gcode
 
 # Testing artifacts

@@ -21,22 +21,10 @@ services:
       retries: 5
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   api:
     image: ghcr.io/taylormadearmy/u1-slicer-bridge-api:latest
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-u1slicer}:${POSTGRES_PASSWORD:-u1slicer}@postgres:5432/${POSTGRES_DB:-u1slicer}
-      REDIS_URL: redis://redis:6379/0
       # MOONRAKER_URL: http://192.168.1.100:7125
     volumes:
       - data_storage:/data
@@ -49,8 +37,6 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
 
   web:
@@ -71,4 +57,3 @@ services:
 volumes:
   data_storage:
   postgres_data:
-  redis_data:

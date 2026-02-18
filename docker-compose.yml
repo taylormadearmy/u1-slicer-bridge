@@ -13,16 +13,6 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   api:
     build: ./apps/api
     ports:
@@ -31,7 +21,6 @@ services:
       - data_storage:/data
     environment:
       DATABASE_URL: postgresql://u1slicer:u1slicer@postgres:5432/u1slicer
-      REDIS_URL: redis://redis:6379/0
       # MOONRAKER_URL: http://your-printer-ip:7125
       # ALLOWED_ORIGINS: http://192.168.1.50:8080  # Optional: restrict CORS (defaults to allow all)
     restart: unless-stopped
@@ -44,21 +33,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  worker:
-    build: ./apps/worker
-    restart: unless-stopped
-    volumes:
-      - data_storage:/data
-      - data_cache:/cache
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "sleep"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
 
   web:
     build: ./apps/web
@@ -77,6 +51,4 @@ services:
 
 volumes:
   data_storage:
-  data_cache:
   postgres_data:
-  redis_data:

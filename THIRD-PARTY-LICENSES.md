@@ -56,7 +56,6 @@ This project includes or depends on the following third-party software.
 | FastAPI | MIT |
 | uvicorn | BSD-3-Clause |
 | asyncpg | Apache-2.0 |
-| redis | MIT |
 | httpx | BSD-3-Clause |
 | python-multipart | Apache-2.0 |
 | numpy | BSD-3-Clause |
