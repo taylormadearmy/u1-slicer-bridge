@@ -389,14 +389,13 @@ Multi-plate files were being treated as a single giant plate, causing:
   - Error: `Multicolour requested, but slicer produced single-tool G-code (T0 only).`
 - **Tracking tool**: `apps/api/app/multicolor_matrix.py` remains available for additional strategy validation on other model variants.
 
-**Fixed: Dragon Scale Segfault Path (>4 Colors on U1)**
-- **Problem**: `Dragon Scale infinity.3mf` could trigger Orca segmentation faults when sliced as multicolour.
-- **Root Cause**: File reports 7 detected color regions while U1 supports max 4 extruders; forcing multicolour requests caused unstable slicer behavior.
+**Fixed: >4 Color Support (Color-to-Extruder Mapping)**
+- **Problem**: `Dragon Scale infinity.3mf` reports 7 detected color regions while U1 supports max 4 extruders; previously rejected with fallback to single-filament mode.
 - **Fix**:
-  1. Frontend now falls back to single-filament mode when detected colors exceed 4 and shows a clear notice.
-  2. Override mode is disabled for this overflow case.
-  3. Backend now rejects multicolour requests for >4 detected colors (and rejects `filament_ids` longer than 4) with a clear 400 error.
-- **Result**: Dragon slices reliably in single-filament mode; unsupported multicolour requests fail fast with actionable error text.
+  1. Frontend maps all detected colors to available extruders (E1-E4) via round-robin assignment. Users can reassign any color to any extruder via dropdown.
+  2. Multiple colors can share an extruder (no swap logic — direct assignment).
+  3. Backend accepts up to 4 `filament_ids` and applies `extruder_remap` to collapse >4 source extruders in the 3MF pre-slice. Per-filament arrays are padded to match.
+- **Result**: Files with any number of colors are fully supported in multicolour mode with user-configurable extruder mapping.
 
 **Active-Color Detection Update (Assignment-Aware)**
 - **Problem**: Some Bambu files report many palette/default colors in metadata, which overstated actual extruders in use.
@@ -404,12 +403,23 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Result**: Dragon now reports only assigned colors (e.g., 3 active colors instead of 7 metadata colors), improving UI assignment behavior and validation decisions.
 
 **Fixed: SEMM (Painted) Multicolour Files Detected as Single-Colour**
-- **Problem**: Bambu-style painted files (e.g., SpeedBoatRace) with `paint_color` per-triangle attributes showed only 1 detected colour, hiding the multicolour UI.
-- **Root Cause**: `detect_colors_from_3mf()` early-returned with only the colour at the single object-level `extruder="1"` assignment, missing the other 3 filament colours used by the painting data.
+- **Problem**: Bambu-style painted files (e.g., SpeedBoatRace, colored 3DBenchy) with `paint_color` per-triangle attributes showed only 1 detected colour, hiding the multicolour UI.
+- **Root Cause**: `detect_colors_from_3mf()` early-returned with only the colour at the single object-level `extruder="1"` assignment, missing the other filament colours used by the painting data.
 - **Fix**:
-  1. `parser_3mf.py`: Checks `single_extruder_multi_material == "1"` AND confirms actual `paint_color` data in mesh triangles (via `_has_paint_data()`) before returning all `filament_colour` entries. The `paint_color` check is critical because `single_extruder_multi_material` alone is just AMS machine config and can be set on non-painted files (e.g., Fiddle Balls with 10 AMS palette colours but no painting).
-  2. `routes_slice.py` (both endpoints): `required_extruders` and `multicolor_slot_count` now use `max(active_extruders, detected_colors)` so painted files auto-expand correctly.
-- **Result**: SpeedBoatRace correctly reports 4 colours. Fiddle Balls correctly reports 1 colour (AMS palette ignored).
+  1. `parser_3mf.py`: Detects `paint_color` data in mesh triangles (via `_has_paint_data()`) regardless of `single_extruder_multi_material` flag — some exports set it to "0" even for painted files. Returns all `filament_colour` entries when paint data is present, preventing phantom `extruder_colour` from mixing in.
+  2. `profile_embedder.py`: Added `_has_paint_data_zip()` to detect paint data. Enables SEMM mode (`single_extruder_multi_material=1`) and disables `ooze_prevention` (incompatible with SEMM+wipe tower) for painted multicolour files.
+  3. `routes_slice.py` (both endpoints): `required_extruders` and `multicolor_slot_count` now use `max(active_extruders, detected_colors)` so painted files auto-expand correctly.
+- **Result**: Painted files correctly report all filament colours. SEMM mode enabled for paint processing. Note: Snapmaker Orca v2.2.4 has limited per-triangle paint segmentation support.
+
+**Fixed: Bambu Plate ID Mismatch (slice-plate 500 error)**
+- **Problem**: Slicing Bambu files via `/slice-plate` returned `invalid plate id 2, total 1` error.
+- **Root Cause**: Bambu files define plates via `Metadata/plate_*.json` (typically only `plate_1.json`), but our `multi_plate_parser` maps `<item>` elements to "plates" (1-indexed). UI requested plate 2 but Orca only has plate 1.
+- **Fix**: `routes_slice.py` always uses `effective_plate_id = 1` for all Bambu files when calling Orca's `--slice` flag.
+
+**Fixed: Alpine.js Double Initialization**
+- **Problem**: Responsive tests timing out; all API calls firing twice during page load.
+- **Root Cause**: `<body x-data="app()" x-init="init()">` called `init()` twice — Alpine v3 auto-calls `init()` on data objects from `x-data`, and `x-init` called it again. With Moonraker configured but unreachable, two sequential 10s health checks = 20s, exceeding the 15s `networkidle` timeout.
+- **Fix**: Removed redundant `x-init="init()"`. Responsive tests now use `domcontentloaded` instead of `networkidle`.
 
 **Implemented: Layer-Based Tool Change Detection (MultiAsSingle Dual-Colour)**
 - **Problem**: Bambu files with mid-print filament swaps stored in `custom_gcode_per_layer.xml` (e.g., Fiddle Balls "dual colour" plates) were detected as single-colour.

@@ -2,7 +2,7 @@
 
 **Repository:** https://github.com/taylormadearmy/u1-slicer-bridge
 
-Self-hostable, Docker-first service for Snapmaker U1 3D printing workflow.
+A self-contained Docker service that lets you upload a 3MF file, slice it, and send it to your Snapmaker U1 printer — all from a web browser on your phone. Everything you need (slicer, profiles, web UI) is bundled in the Docker image. Just run the container and open the page.
 
 > **WARNING — Use at your own risk.** This software is provided as-is with no warranty. It generates G-code that controls a 3D printer with a heated bed and hot end. Incorrect G-code can damage your printer, cause fires, or create other hazards. Always supervise your printer while it is running. The authors accept no responsibility for property damage, injury, or any other consequences arising from the use of this software.
 
