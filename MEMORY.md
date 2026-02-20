@@ -2,6 +2,15 @@
 
 > Concise bug fix journal. For full implementation history, see [AGENTS.md](AGENTS.md).
 
+## Multi-Arch Slicer Packaging (2026-02-20)
+
+### AppImage → Flatpak Migration
+- **Symptom**: AppImage-based Orca install blocked multi-arch container builds.
+- **Cause**: The pinned AppImage path was not portable/reliable across both `amd64` and `aarch64` targets.
+- **Fix**: Switched API Docker image to install Snapmaker Orca from architecture-specific GitHub Flatpak bundles (`x86_64`/`aarch64`) and invoke the installed binary directly from the Flatpak payload (no `flatpak run` sandbox) to avoid Docker `bwrap` namespace failures.
+- **Files**: `apps/api/Dockerfile`, `THIRD-PARTY-LICENSES.md`
+- **Note**: API Dockerfile now resolves `fdm_process_common.json` dynamically from the Flatpak installation path.
+
 ## 3D G-code Viewer (M12) — 2026-02-17
 
 ### Implementation
