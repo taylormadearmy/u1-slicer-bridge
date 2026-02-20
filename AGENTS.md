@@ -72,11 +72,11 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
-❌ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info/profiles and auto-download 3MF into upload pipeline. Feasibility researched; plan in `memory/milestone-makerworld-integration.md`
+✅ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info and download 3MF. Optional feature (off by default), cookie auth for unlimited downloads, browser-like request headers
 ✅ M30 STL upload support - Accept .stl files via trimesh STL→3MF wrapper. Single-filament only (no multi-plate, no color detection, no embedded print settings). OrcaSlicer slices the wrapped 3MF as normal.
 ❌ M31 Android companion app - Lightweight WebView wrapper (~50 lines Kotlin, ~1-2MB APK). Provides standalone app launch (no browser chrome), share target for MakerWorld URLs, configurable server IP. Works over plain HTTP on LAN. Built via GitHub Actions, distributed as APK from Releases.
 
-**Current:** 29.7 / 30 complete (99%)
+**Current:** 30.7 / 32 complete (96%)
 
 ---
 
@@ -145,11 +145,17 @@ Avoid:
 
 After pushing commits, **always ask the user if they want to tag a release** to trigger Docker image builds on GHCR.
 
+**IMPORTANT: Never push directly to prod.** Always release as beta first (`v1.x.x-beta.1`), then promote to stable (`v1.x.x`) after testing.
+
 ```bash
+# Beta release (always do this first)
+git tag v1.x.x-beta.1 && git push origin v1.x.x-beta.1
+
+# Stable/prod release (only after beta has been tested)
 git tag v1.x.x && git push origin v1.x.x
 ```
 
-This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web}` with semver + `latest` tags. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
+This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web}`. Beta tags get `:beta`, stable tags get `:latest`. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
 
 ### Third-Party License Attribution
 

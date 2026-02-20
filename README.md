@@ -16,6 +16,7 @@ upload .3mf/.stl → validate plate → configure → slice → preview → prin
 
 **Key Features:**
 - Upload `.3mf` and `.stl` files (including MakerWorld/Bambu Studio and PrusaSlicer exports)
+- **MakerWorld URL import** — paste a MakerWorld link to preview model info and download 3MF directly (optional, with cookie auth for unlimited downloads)
 - Multi-plate 3MF support with per-plate validation and visual selection
 - Multicolour/multi-extruder slicing (up to 4 extruders)
 - Automatic plate validation (270x270x270mm build volume)
@@ -29,6 +30,7 @@ upload .3mf/.stl → validate plate → configure → slice → preview → prin
 - Printer status page with live progress, temperatures, and state monitoring
 - Configurable Moonraker URL (persisted in database)
 - File management (browse, download, delete uploads and sliced files)
+- PWA support (installable on desktop, with Share Target API for future Android companion app)
 - Modern web UI with settings modal and 3-step slice workflow
 
 ## Quick Start
@@ -171,6 +173,7 @@ All data is stored under `/data`:
 | M27 | Concurrency hardening - UUID temp files, slicer process semaphore |
 | M29 | 3-way setting modes - Per-setting model/orca/override with file detection |
 | M30 | STL upload support - Wrap STL in 3MF via trimesh for slicing |
+| M26 | MakerWorld URL import - Paste URL to preview and download 3MF with optional cookie auth |
 
 ### Not Yet Implemented
 
@@ -178,13 +181,12 @@ All data is stored under `/data`:
 |----|---------|
 | M14 | Multi-machine support |
 | M19 | Slicer selection (OrcaSlicer vs Snapmaker Orca) |
-| M26 | MakerWorld link import - Paste URL to auto-download 3MF |
+| M31 | Android companion app - Lightweight WebView wrapper with share target |
 
-**Progress:** 29.7 / 30 milestones complete (99%)
+**Progress:** 30.7 / 32 milestones complete (96%)
 
 ## Non-Goals (v1)
 
-- MakerWorld scraping (see M26 for optional link import approach)
 - Mesh repair or geometry modifications
 - Cloud dependencies (LAN-first by default)
 
