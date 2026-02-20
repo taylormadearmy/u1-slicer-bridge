@@ -25,6 +25,11 @@ ALTER TABLE uploads ADD COLUMN IF NOT EXISTS detected_colors TEXT;      -- JSON 
 ALTER TABLE uploads ADD COLUMN IF NOT EXISTS file_print_settings TEXT;  -- JSON object of support/brim settings
 ALTER TABLE uploads ADD COLUMN IF NOT EXISTS plate_metadata TEXT;       -- JSON: full plate info with bounds, validation, colors, previews
 
+-- Multiple copies support (M32)
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS copies_path TEXT;          -- Path to modified 3MF with copies
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS copies_count INTEGER DEFAULT 1;  -- Number of copies on plate
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS copies_spacing REAL DEFAULT 5.0; -- Spacing between copies in mm
+
 -- ============================================================================
 -- OLD TABLES (removed - plate-based workflow)
 -- ============================================================================

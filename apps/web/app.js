@@ -86,12 +86,25 @@ function app() {
         printerSettingsSaving: false,
         printerTestResult: null,
 
+        // Backup & Restore
+        settingsExporting: false,
+        settingsImporting: false,
+        settingsImportFile: null,
+        settingsBackupMessage: null,
+        settingsBackupOk: false,
+
         // MakerWorld import
         makerWorldUrl: '',
         makerWorldLoading: false,
         makerWorldDownloading: false,
         makerWorldModel: null,         // { design_id, title, author, thumbnail, profiles }
         makerWorldSelectedProfile: null, // instance_id
+
+        // Multiple copies (M32)
+        copyCount: 1,
+        copyCountInput: null,
+        copiesApplying: false,
+        copyGridInfo: null,  // { cols, rows, fits_bed, max_copies }
 
         // Print monitor
         printMonitorActive: false,
@@ -1235,6 +1248,48 @@ function app() {
             console.log('Selected plate:', plateId);
         },
 
+        // ---------------------------------------------------------------
+        // Multiple Copies (M32)
+        // ---------------------------------------------------------------
+
+        async applyCopies(n) {
+            n = parseInt(n, 10);
+            if (!n || n < 1 || n > 100 || !this.selectedUpload) return;
+            if (n === this.copyCount) return;
+
+            this.copiesApplying = true;
+            this.copyGridInfo = null;
+            try {
+                if (n === 1) {
+                    // Reset to single copy
+                    await fetch(`/api/upload/${this.selectedUpload.upload_id}/copies`, { method: 'DELETE' });
+                    this.copyCount = 1;
+                    this.copyGridInfo = null;
+                } else {
+                    const response = await fetch(`/api/upload/${this.selectedUpload.upload_id}/copies`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ copies: n, spacing: 5.0 }),
+                    });
+                    if (!response.ok) {
+                        const err = await response.json().catch(() => ({ detail: 'Failed' }));
+                        this.showError(err.detail || 'Failed to apply copies');
+                        return;
+                    }
+                    const result = await response.json();
+                    this.copyCount = n;
+                    this.copyGridInfo = result;
+                    if (!result.fits_bed) {
+                        this.showError(`${n} copies may exceed the build plate. Consider fewer copies.`);
+                    }
+                }
+            } catch (err) {
+                this.showError(`Copies failed: ${err.message}`);
+            } finally {
+                this.copiesApplying = false;
+            }
+        },
+
         /**
          * Start slicing (Step 3)
          */
@@ -1449,6 +1504,10 @@ function app() {
             this.printMonitorActive = false;
             this.printSending = false;
             this.printState = null;
+            this.copyCount = 1;
+            this.copyCountInput = null;
+            this.copiesApplying = false;
+            this.copyGridInfo = null;
 
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
@@ -1913,6 +1972,69 @@ function app() {
                 this.hasMakerWorldCookies = false;
             } catch (err) {
                 console.warn('Failed to clear MakerWorld cookies:', err);
+            }
+        },
+
+        // ---------------------------------------------------------------
+        // Backup & Restore
+        // ---------------------------------------------------------------
+
+        async exportSettings() {
+            this.settingsExporting = true;
+            this.settingsBackupMessage = null;
+            try {
+                const response = await fetch('/api/settings/export');
+                if (!response.ok) throw new Error(`Export failed: HTTP ${response.status}`);
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const date = new Date().toISOString().slice(0, 10);
+                a.download = `u1-slicer-settings-${date}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                this.settingsBackupOk = true;
+                this.settingsBackupMessage = 'Settings exported successfully.';
+            } catch (err) {
+                this.settingsBackupOk = false;
+                this.settingsBackupMessage = `Export failed: ${err.message}`;
+            } finally {
+                this.settingsExporting = false;
+                setTimeout(() => { this.settingsBackupMessage = null; }, 5000);
+            }
+        },
+
+        async importSettings() {
+            if (!this.settingsImportFile) return;
+            this.settingsImporting = true;
+            this.settingsBackupMessage = null;
+            try {
+                const formData = new FormData();
+                formData.append('file', this.settingsImportFile);
+                const response = await fetch('/api/settings/import', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({ detail: 'Import failed' }));
+                    throw new Error(err.detail || `HTTP ${response.status}`);
+                }
+                const result = await response.json();
+                // Reload all settings from DB
+                await this.loadFilaments();
+                await this.loadExtruderPresets();
+                await this.loadPrinterSettings();
+                this.settingsBackupOk = true;
+                this.settingsBackupMessage = `Settings restored: ${result.filaments_imported} filaments, presets & defaults updated.`;
+                this.settingsImportFile = null;
+            } catch (err) {
+                this.settingsBackupOk = false;
+                this.settingsBackupMessage = `Import failed: ${err.message}`;
+            } finally {
+                this.settingsImporting = false;
+                setTimeout(() => { this.settingsBackupMessage = null; }, 8000);
             }
         },
 

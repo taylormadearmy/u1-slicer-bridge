@@ -29,6 +29,39 @@
         .thumb-zoom:hover { overflow: visible; z-index: 50; }
         .thumb-zoom:hover img { transform: scale(3); box-shadow: 0 4px 15px rgba(0,0,0,0.3); border-radius: 4px; position: relative; z-index: 50; }
         .thumb-zoom img { transition: transform 0.15s ease; }
+        /* Vertical layer slider */
+        .vertical-slider {
+            writing-mode: vertical-lr;
+            direction: rtl;
+            appearance: none;
+            -webkit-appearance: none;
+            width: 6px;
+            background: #d1d5db;
+            border-radius: 3px;
+            cursor: pointer;
+            outline: none;
+            touch-action: none; /* Prevent pull-to-refresh on mobile */
+        }
+        .vertical-slider::-webkit-slider-thumb {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            background: #3b82f6;
+            border-radius: 50%;
+            cursor: grab;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        .vertical-slider::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            background: #3b82f6;
+            border-radius: 50%;
+            cursor: grab;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen" x-data="app()">
@@ -355,6 +388,45 @@
                             </template>
                         </div>
                     </div>
+
+                    <!-- Copies control (single-plate, non-multi-plate files only) -->
+                    <template x-if="!selectedUpload?.is_multi_plate">
+                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
+                            <div class="flex items-center gap-3 flex-wrap">
+                                <span class="text-sm font-medium text-gray-700">Copies:</span>
+                                <div class="flex gap-1">
+                                    <template x-for="n in [1, 2, 4, 6, 9]" :key="n">
+                                        <button @click="applyCopies(n)"
+                                                :class="copyCount === n ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'"
+                                                :disabled="copiesApplying"
+                                                class="px-3 py-1 rounded text-sm font-medium transition"
+                                                x-text="n"></button>
+                                    </template>
+                                </div>
+                                <div class="flex items-center gap-1">
+                                    <input type="number" min="1" max="100"
+                                           x-model.number="copyCountInput"
+                                           @keydown.enter="applyCopies(copyCountInput)"
+                                           class="w-16 px-2 py-1 text-sm border border-gray-300 rounded"
+                                           placeholder="#">
+                                    <button @click="applyCopies(copyCountInput)"
+                                            :disabled="copiesApplying || !copyCountInput || copyCountInput < 1"
+                                            class="px-2 py-1 text-xs bg-gray-200 hover:bg-gray-300 rounded disabled:opacity-50 transition">
+                                        Go
+                                    </button>
+                                </div>
+                                <span x-show="copiesApplying" class="text-xs text-blue-600 flex items-center gap-1">
+                                    <svg class="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                                    </svg>
+                                    Arranging...
+                                </span>
+                                <span x-show="copyGridInfo && !copiesApplying" class="text-xs text-gray-500"
+                                      x-text="copyGridInfo ? `${copyGridInfo.cols}×${copyGridInfo.rows} grid` + (copyGridInfo.max_copies ? ` (max ~${copyGridInfo.max_copies})` : '') : ''"></span>
+                            </div>
+                        </div>
+                    </template>
 
                     <!-- ▼ Accordion: Colours & Filaments -->
                     <div class="mb-4 border border-gray-200 rounded-lg overflow-hidden">
@@ -891,100 +963,102 @@
             <h3 class="text-lg font-semibold mb-4">G-code Preview</h3>
 
             <template x-if="sliceResult && sliceResult.job_id">
-                <div x-data="gcodeViewer(sliceResult.job_id, sliceResult.filament_colors)" class="space-y-4">
-                <!-- Canvas Container -->
-                <div class="relative bg-gray-900 rounded-lg overflow-hidden" style="height: 400px;">
-                    <canvas x-ref="canvas" class="w-full h-full"></canvas>
+                <div x-data="gcodeViewer(sliceResult.job_id, sliceResult.filament_colors)" class="space-y-3">
+                <!-- Viewer + vertical layer slider -->
+                <div class="flex gap-0" style="height: 400px;">
+                    <!-- Canvas Container -->
+                    <div class="relative bg-gray-900 rounded-l-lg overflow-hidden flex-1">
+                        <canvas x-ref="canvas" class="w-full h-full"></canvas>
 
-                    <!-- Zoom controls overlay -->
-                    <div class="absolute top-2 right-2 flex flex-col gap-1 z-10">
-                        <button @click="zoomIn()" title="Zoom in"
-                                class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">+</button>
-                        <button @click="zoomOut()" title="Zoom out"
-                                class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">&minus;</button>
-                        <button @click="resetView()" title="Fit to bed"
-                                class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center">
-                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
-                            </svg>
-                        </button>
-                    </div>
+                        <!-- Zoom controls overlay -->
+                        <div class="absolute top-2 right-2 flex flex-col gap-1 z-10">
+                            <button @click="zoomIn()" title="Zoom in"
+                                    class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">+</button>
+                            <button @click="zoomOut()" title="Zoom out"
+                                    class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">&minus;</button>
+                            <button @click="resetView()" title="Fit to bed"
+                                    class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center">
+                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                    <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+                                </svg>
+                            </button>
+                        </div>
 
-                    <!-- Loading overlay -->
-                    <div x-show="loading" class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-                        <div class="text-white text-sm flex items-center gap-2">
-                            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
-                            </svg>
-                            <span x-text="loadingMessage"></span>
+                        <!-- Loading overlay -->
+                        <div x-show="loading" class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
+                            <div class="text-white text-sm flex items-center gap-2">
+                                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                                </svg>
+                                <span x-text="loadingMessage"></span>
+                            </div>
+                        </div>
+
+                        <!-- Error message -->
+                        <div x-show="error" class="absolute inset-0 bg-red-900 bg-opacity-75 flex items-center justify-center p-4">
+                            <div class="text-white text-sm text-center" x-text="error"></div>
                         </div>
                     </div>
 
-                    <!-- Error message -->
-                    <div x-show="error" class="absolute inset-0 bg-red-900 bg-opacity-75 flex items-center justify-center p-4">
-                        <div class="text-white text-sm text-center" x-text="error"></div>
-                    </div>
-                </div>
-
-                <!-- Layer Controls -->
-                <div class="space-y-3">
-                    <!-- Layer slider -->
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm">
-                            <span class="text-gray-600">Layer</span>
-                            <span class="font-medium" x-text="displayLayerText()"></span>
-                        </div>
+                    <!-- Vertical layer slider rail -->
+                    <div class="flex flex-col items-center bg-gray-100 rounded-r-lg px-1 py-2 w-10 select-none"
+                         style="touch-action: none; overscroll-behavior: contain;"
+                         x-show="totalLayers > 0" x-cloak>
+                        <span class="text-[10px] text-gray-500 mb-1" x-text="totalLayers - 1"></span>
                         <input type="range"
                                x-model.number="currentLayer"
                                @input="onLayerChange(currentLayer)"
                                min="0"
                                :max="totalLayers - 1"
-                               class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider">
+                               class="vertical-slider flex-1"
+                               title="Layer slider">
+                        <span class="text-[10px] text-gray-500 mt-1">0</span>
                     </div>
+                </div>
 
-                    <!-- Navigation buttons -->
-                    <div class="flex gap-2">
+                <!-- Layer info bar + controls -->
+                <div class="flex flex-wrap items-center gap-3 text-sm">
+                    <span class="text-gray-600">Layer <span class="font-medium" x-text="displayLayerText()"></span></span>
+                    <div class="flex gap-1">
                         <button @click="previousLayer()"
                                 :disabled="currentLayer === 0"
-                                class="flex-1 px-4 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded-lg transition text-sm font-medium">
-                            ← Previous
+                                title="Previous layer"
+                                class="px-3 py-1 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded transition text-sm font-medium">
+                            ←
                         </button>
                         <button @click="nextLayer()"
                                 :disabled="currentLayer === totalLayers - 1"
-                                class="flex-1 px-4 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded-lg transition text-sm font-medium">
-                            Next →
+                                title="Next layer"
+                                class="px-3 py-1 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded transition text-sm font-medium">
+                            →
                         </button>
                     </div>
-
-                    <!-- View options -->
-                    <div class="flex items-center gap-4 text-sm">
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input type="checkbox"
-                                   x-model="showTravel"
-                                   @change="toggleTravel()"
-                                   class="rounded">
-                            <span class="text-gray-700">Show travel moves</span>
-                        </label>
-                    </div>
-
-                    <!-- Color Legend (shown when multiple colors) -->
-                    <template x-if="filamentColors && filamentColors.length > 1">
-                        <div class="mt-3 p-3 bg-gray-100 rounded-lg">
-                            <div class="text-xs text-gray-600 mb-2">Extruder Colors:</div>
-                            <div class="flex flex-wrap gap-2">
-                                <template x-for="(color, idx) in filamentColors" :key="idx">
-                                    <div class="flex items-center gap-1 px-2 py-1 bg-white rounded border">
-                                        <div class="w-3 h-3 rounded-full border" 
-                                             :style="`background-color: ${color}`"></div>
-                                        <span class="text-xs text-gray-700" x-text="`E${idx + 1}`"></span>
-                                        <span class="text-xs text-gray-500" x-text="color"></span>
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                    </template>
+                    <label class="flex items-center gap-2 cursor-pointer ml-auto">
+                        <input type="checkbox"
+                               x-model="showTravel"
+                               @change="toggleTravel()"
+                               class="rounded">
+                        <span class="text-gray-700">Travel</span>
+                    </label>
                 </div>
+
+                <!-- Color Legend (shown when multiple colors) -->
+                <template x-if="filamentColors && filamentColors.length > 1">
+                    <div class="p-3 bg-gray-100 rounded-lg">
+                        <div class="text-xs text-gray-600 mb-2">Extruder Colors:</div>
+                        <div class="flex flex-wrap gap-2">
+                            <template x-for="(color, idx) in filamentColors" :key="idx">
+                                <div class="flex items-center gap-1 px-2 py-1 bg-white rounded border">
+                                    <div class="w-3 h-3 rounded-full border"
+                                         :style="`background-color: ${color}`"></div>
+                                    <span class="text-xs text-gray-700" x-text="`E${idx + 1}`"></span>
+                                    <span class="text-xs text-gray-500" x-text="color"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
 
                 <!-- Mobile hint -->
                 <p class="text-xs text-gray-500 text-center md:hidden">
@@ -1618,6 +1692,50 @@
                 </template>
             </div>
         </section>
+        <!-- Settings: Backup & Restore -->
+        <section class="bg-white shadow-sm p-4 md:p-6">
+            <h2 class="text-lg md:text-xl font-semibold mb-4">Backup & Restore</h2>
+            <p class="text-sm text-gray-600 mb-4">Export all settings (filaments, extruder presets, slicing defaults, printer URL) as a JSON file, or restore from a previous backup.</p>
+
+            <div class="flex flex-wrap gap-3 items-start">
+                <!-- Export -->
+                <button @click="exportSettings()"
+                        :disabled="settingsExporting"
+                        class="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition flex items-center gap-2">
+                    <svg x-show="settingsExporting" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                    </svg>
+                    <span x-text="settingsExporting ? 'Exporting...' : 'Export Settings'"></span>
+                </button>
+
+                <!-- Import -->
+                <div class="flex items-center gap-2">
+                    <label class="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 cursor-pointer transition">
+                        Choose Backup File
+                        <input type="file" accept=".json" class="hidden"
+                               @change="settingsImportFile = $event.target.files[0]">
+                    </label>
+                    <span x-show="settingsImportFile" class="text-sm text-gray-600 truncate max-w-[200px]" x-text="settingsImportFile?.name"></span>
+                </div>
+                <button x-show="settingsImportFile"
+                        @click="importSettings()"
+                        :disabled="settingsImporting"
+                        class="px-4 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 disabled:bg-gray-400 transition flex items-center gap-2">
+                    <svg x-show="settingsImporting" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                    </svg>
+                    <span x-text="settingsImporting ? 'Importing...' : 'Import Settings'"></span>
+                </button>
+            </div>
+
+            <!-- Status message -->
+            <div x-show="settingsBackupMessage" class="mt-3 p-3 rounded-lg text-sm"
+                 :class="settingsBackupOk ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'"
+                 x-text="settingsBackupMessage"></div>
+        </section>
+
                 <div x-show="appVersion" class="bg-white rounded-b-lg px-6 py-3 text-center border-t border-gray-100">
                     <span class="text-[11px] text-gray-400" x-text="'U1 Slicer Bridge ' + appVersion"></span>
                 </div>

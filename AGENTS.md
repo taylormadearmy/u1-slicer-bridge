@@ -76,7 +76,13 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 ✅ M30 STL upload support - Accept .stl files via trimesh STL→3MF wrapper. Single-filament only (no multi-plate, no color detection, no embedded print settings). OrcaSlicer slices the wrapped 3MF as normal.
 ❌ M31 Android companion app - Lightweight WebView wrapper (~50 lines Kotlin, ~1-2MB APK). Provides standalone app launch (no browser chrome), share target for MakerWorld URLs, configurable server IP. Works over plain HTTP on LAN. Built via GitHub Actions, distributed as APK from Releases.
 
-**Current:** 30.7 / 32 complete (96%)
+### Build Plate & Workflow Enhancements
+✅ M32 Multiple copies - Grid layout engine for duplicating objects on the build plate (1-100 copies, auto spacing, metadata patching for Orca compatibility)
+❌ M33 Move objects on build plate - Interactive drag-to-position objects before slicing
+✅ M34 Vertical layer slider - Side-mounted vertical range input for G-code layer navigation
+✅ M35 Settings backup/restore - Export/import all settings (filaments, presets, defaults) as portable JSON
+
+**Current:** 33.7 / 36 complete (94%)
 
 ---
 

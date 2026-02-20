@@ -271,7 +271,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Validate upload exists
         upload = await conn.fetchrow(
             """
-            SELECT id, filename, file_path, bounds_warning, detected_colors
+            SELECT id, filename, file_path, bounds_warning, detected_colors,
+                   copies_path, copies_count, copies_spacing
             FROM uploads
             WHERE id = $1
             """,
@@ -318,8 +319,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         filament_names = [f["name"] for f in filaments]
         job_logger.info(f"Using filaments: {', '.join(filament_names)}")
 
-        # Check original 3MF file exists
+        # Always use the ORIGINAL file for profile embedding and metadata.
+        # Copies are re-applied AFTER embedding to avoid trimesh destroying
+        # the multi-item layout (Bambu files get trimesh-processed during embedding).
         source_3mf = Path(upload["file_path"])
+        copies_count = upload["copies_count"] or 1
+        copies_spacing = upload["copies_spacing"] or 5.0
+        if copies_count > 1:
+            job_logger.info(f"Will apply {copies_count} copies (spacing={copies_spacing}mm) after embedding")
         if not source_3mf.exists():
             job_logger.error(f"Source 3MF file not found: {source_3mf}")
             raise HTTPException(status_code=500, detail="Source 3MF file not found")
@@ -395,7 +402,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Embed profiles into original 3MF
         job_logger.info("Embedding Orca profiles into original 3MF...")
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
-        embedded_3mf = workspace / "sliceable.3mf"
+        embedded_3mf = workspace / "embedded.3mf"
 
         # Prepare filament settings for multi-extruder
         # Orca expects temperatures as arrays of strings
@@ -539,12 +546,24 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             job_logger.error(f"Failed to embed profiles: {str(e)}")
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
+        # Apply copies to the embedded 3MF if needed (post-embedding avoids
+        # trimesh destroying the multi-item layout for Bambu files)
+        if copies_count > 1:
+            from copy_duplicator import apply_copies_to_3mf
+            sliceable_3mf = workspace / "sliceable.3mf"
+            copy_result = await asyncio.to_thread(
+                apply_copies_to_3mf, embedded_3mf, sliceable_3mf, copies_count, copies_spacing
+            )
+            job_logger.info(f"Applied {copies_count} copies: {copy_result['cols']}x{copy_result['rows']} grid")
+        else:
+            sliceable_3mf = embedded_3mf
+
         # Slice with Orca (async to avoid blocking other API requests)
         job_logger.info("Invoking Orca Slicer...")
         printer_profile = get_printer_profile("snapmaker_u1")
         slicer = OrcaSlicer(printer_profile)
 
-        result = await slicer.slice_3mf_async(embedded_3mf, workspace)
+        result = await slicer.slice_3mf_async(sliceable_3mf, workspace)
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")

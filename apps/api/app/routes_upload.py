@@ -271,3 +271,108 @@ async def delete_upload(upload_id: int):
         await conn.execute("DELETE FROM uploads WHERE id = $1", upload_id)
     
     return {"message": "Upload deleted successfully"}
+
+
+# -----------------------------------------------------------------------
+# Multiple Copies (M32)
+# -----------------------------------------------------------------------
+
+@router.post("/{upload_id}/copies")
+async def apply_copies(upload_id: int, body: dict):
+    """Add multiple copies of the object arranged in a grid on the build plate.
+
+    Body: { "copies": 4, "spacing": 5.0 }
+    """
+    from copy_duplicator import apply_copies_to_3mf, get_object_dimensions, estimate_max_copies
+
+    copies = body.get("copies", 1)
+    spacing = body.get("spacing", 5.0)
+
+    if copies < 1 or copies > 100:
+        raise HTTPException(400, "copies must be between 1 and 100")
+    if spacing < 0 or spacing > 50:
+        raise HTTPException(400, "spacing must be between 0 and 50 mm")
+
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            "SELECT file_path, filename FROM uploads WHERE id = $1", upload_id
+        )
+        if not upload:
+            raise HTTPException(404, "Upload not found")
+
+        source_path = Path(upload["file_path"])
+        if not source_path.exists():
+            raise HTTPException(404, "Upload file not found on disk")
+
+        # Output goes alongside the original with a suffix
+        copies_path = source_path.with_suffix(".copies.3mf")
+
+        try:
+            result = apply_copies_to_3mf(source_path, copies_path, copies, spacing)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        # Store the copies path and spacing in the upload metadata
+        await conn.execute(
+            "UPDATE uploads SET copies_path = $1, copies_count = $2, copies_spacing = $3 WHERE id = $4",
+            str(copies_path), copies, spacing, upload_id,
+        )
+
+    return result
+
+
+@router.delete("/{upload_id}/copies")
+async def reset_copies(upload_id: int):
+    """Remove copies and revert to the original single object."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            "SELECT copies_path FROM uploads WHERE id = $1", upload_id
+        )
+        if not upload:
+            raise HTTPException(404, "Upload not found")
+
+        # Delete copies file if it exists
+        if upload["copies_path"]:
+            copies_path = Path(upload["copies_path"])
+            if copies_path.exists():
+                copies_path.unlink()
+
+        await conn.execute(
+            "UPDATE uploads SET copies_path = NULL, copies_count = 1 WHERE id = $1",
+            upload_id,
+        )
+
+    return {"message": "Copies removed", "copies": 1}
+
+
+@router.get("/{upload_id}/copies/info")
+async def get_copies_info(upload_id: int):
+    """Get object dimensions and max copy estimate for this upload."""
+    from copy_duplicator import get_object_dimensions, estimate_max_copies
+
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            "SELECT file_path, copies_count FROM uploads WHERE id = $1", upload_id
+        )
+        if not upload:
+            raise HTTPException(404, "Upload not found")
+
+        source_path = Path(upload["file_path"])
+        if not source_path.exists():
+            raise HTTPException(404, "Upload file not found on disk")
+
+    try:
+        obj_w, obj_d, obj_h = get_object_dimensions(source_path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    max_copies = estimate_max_copies(obj_w, obj_d)
+
+    return {
+        "object_dimensions": [round(obj_w, 1), round(obj_d, 1), round(obj_h, 1)],
+        "max_copies": max_copies,
+        "current_copies": upload["copies_count"] or 1,
+    }
