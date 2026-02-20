@@ -80,9 +80,18 @@ function app() {
         printerStatus: 'Checking...',
 
         // Printer settings (for Settings modal)
-        printerSettings: { moonraker_url: '' },
+        printerSettings: { moonraker_url: '', makerworld_cookies: '' },
+        hasMakerWorldCookies: false,
+        makerWorldEnabled: false,
         printerSettingsSaving: false,
         printerTestResult: null,
+
+        // MakerWorld import
+        makerWorldUrl: '',
+        makerWorldLoading: false,
+        makerWorldDownloading: false,
+        makerWorldModel: null,         // { design_id, title, author, thumbnail, profiles }
+        makerWorldSelectedProfile: null, // instance_id
 
         // Print monitor
         printMonitorActive: false,
@@ -174,6 +183,36 @@ function app() {
 
             // Set up periodic printer status check
             setInterval(() => this.checkPrinterStatus(), 30000); // Every 30 seconds
+
+            // Handle PWA share target — auto-populate MakerWorld URL if shared
+            this._handleShareTarget();
+        },
+
+        _handleShareTarget() {
+            const params = new URLSearchParams(window.location.search);
+            if (!params.get('share')) return;
+
+            // Extract URL from share params (Android puts URL in 'text' or 'url')
+            const sharedUrl = params.get('url') || params.get('text') || '';
+            const makerWorldUrl = this._extractMakerWorldUrl(sharedUrl);
+
+            // Clean the URL bar (remove query params)
+            window.history.replaceState({}, '', '/');
+
+            if (makerWorldUrl && this.makerWorldEnabled) {
+                this.makerWorldUrl = makerWorldUrl;
+                this.lookupMakerWorld();
+            } else if (makerWorldUrl && !this.makerWorldEnabled) {
+                // Shared a MakerWorld URL but feature is disabled
+                this.errorMessage = 'MakerWorld integration is disabled. Enable it in Settings to import shared links.';
+            }
+        },
+
+        _extractMakerWorldUrl(text) {
+            if (!text) return null;
+            // Find a MakerWorld URL anywhere in the shared text
+            const match = text.match(/https?:\/\/(?:www\.)?makerworld\.com\/[^\s]*/i);
+            return match ? match[0] : null;
         },
 
         /**
@@ -969,7 +1008,114 @@ function app() {
             }
         },
 
-/**
+        // ----- MakerWorld Import -----
+
+        /**
+         * Look up a MakerWorld model by URL
+         */
+        async lookupMakerWorld() {
+            const url = (this.makerWorldUrl || '').trim();
+            if (!url) return;
+
+            this.makerWorldLoading = true;
+            this.makerWorldModel = null;
+            this.makerWorldSelectedProfile = null;
+            this.error = null;
+
+            try {
+                const result = await api.lookupMakerWorld(url);
+                this.makerWorldModel = result;
+                // Auto-select first profile
+                if (result.profiles && result.profiles.length > 0) {
+                    this.makerWorldSelectedProfile = result.profiles[0].instance_id;
+                }
+            } catch (err) {
+                this.showError(`MakerWorld lookup failed: ${err.message}`);
+            } finally {
+                this.makerWorldLoading = false;
+            }
+        },
+
+        /**
+         * Download a 3MF from MakerWorld and import it
+         */
+        async downloadMakerWorld() {
+            if (!this.makerWorldModel || !this.makerWorldSelectedProfile) return;
+
+            this.makerWorldDownloading = true;
+            this.error = null;
+
+            try {
+                const result = await api.downloadMakerWorld(
+                    this.makerWorldUrl.trim(),
+                    this.makerWorldSelectedProfile
+                );
+
+                // Feed into the same post-upload flow as manual uploads
+                this.uploads.unshift(result);
+                this.selectedUpload = result;
+                this.selectedPlate = null;
+                this.plates = [];
+                this.platesLoading = false;
+                this.activeTab = 'upload';
+
+                if (this.filaments.length === 0) {
+                    await this.loadFilaments();
+                }
+
+                this.filamentOverride = false;
+                this.applyDetectedColors(result.detected_colors || []);
+                this.resetJobOverrideSettings();
+                this.currentStep = 'configure';
+
+                // Load plate info
+                this.platesLoading = true;
+                this.plates = [];
+                try {
+                    const platesData = await api.getUploadPlates(result.upload_id);
+                    this.platesLoading = false;
+
+                    if (platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
+                        this.selectedUpload.is_multi_plate = true;
+                        this.selectedUpload.plate_count = platesData.plate_count;
+                        this.plates = platesData.plates;
+                    } else {
+                        this.selectedUpload.is_multi_plate = false;
+                        this.plates = [];
+                    }
+
+                    const fps = platesData.file_print_settings || result.file_print_settings;
+                    this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
+                    if (this.fileSettings) this.applyFileSettings(this.fileSettings);
+                } catch (err) {
+                    this.platesLoading = false;
+                    this.selectedUpload.is_multi_plate = false;
+                    this.plates = [];
+                    const fps = result.file_print_settings;
+                    this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
+                    if (this.fileSettings) this.applyFileSettings(this.fileSettings);
+                }
+
+                // Reset MakerWorld state
+                this.makerWorldModel = null;
+                this.makerWorldUrl = '';
+                this.makerWorldSelectedProfile = null;
+            } catch (err) {
+                this.showError(`MakerWorld download failed: ${err.message}`);
+            } finally {
+                this.makerWorldDownloading = false;
+            }
+        },
+
+        clearMakerWorld() {
+            this.makerWorldUrl = '';
+            this.makerWorldModel = null;
+            this.makerWorldSelectedProfile = null;
+            this.makerWorldLoading = false;
+            this.makerWorldDownloading = false;
+        },
+
+        /**
          * Select an existing upload (from recent uploads list)
          */
         async selectUpload(upload) {
@@ -1294,6 +1440,7 @@ function app() {
             this.selectedUpload = null;
             this.fileSettings = null;
             this.sliceResult = null;
+            this.clearMakerWorld();
             this.sliceProgress = 0;
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
@@ -1717,7 +1864,12 @@ function app() {
         async loadPrinterSettings() {
             try {
                 const data = await api.getPrinterSettings();
-                this.printerSettings = { moonraker_url: data.moonraker_url || '' };
+                this.printerSettings = {
+                    moonraker_url: data.moonraker_url || '',
+                    makerworld_cookies: '',  // never returned by API (sensitive)
+                };
+                this.hasMakerWorldCookies = data.has_makerworld_cookies || false;
+                this.makerWorldEnabled = data.makerworld_enabled || false;
             } catch (err) {
                 console.warn('Failed to load printer settings:', err);
             }
@@ -1727,7 +1879,20 @@ function app() {
             this.printerSettingsSaving = true;
             this.printerTestResult = null;
             try {
-                await api.savePrinterSettings({ moonraker_url: this.printerSettings.moonraker_url || '' });
+                const payload = {
+                    moonraker_url: this.printerSettings.moonraker_url || '',
+                    makerworld_enabled: this.makerWorldEnabled,
+                };
+                // Only send cookies if user typed something new (field is blank on load for security)
+                if (this.printerSettings.makerworld_cookies) {
+                    payload.makerworld_cookies = this.printerSettings.makerworld_cookies;
+                }
+                await api.savePrinterSettings(payload);
+                // Update cookie status indicator
+                if (this.printerSettings.makerworld_cookies) {
+                    this.hasMakerWorldCookies = true;
+                    this.printerSettings.makerworld_cookies = '';  // clear from memory after save
+                }
                 this.printerTestResult = { ok: true, message: 'Saved' };
                 // Refresh header status after URL change
                 await this.checkPrinterStatus();
@@ -1736,6 +1901,18 @@ function app() {
             } finally {
                 this.printerSettingsSaving = false;
                 setTimeout(() => { this.printerTestResult = null; }, 4000);
+            }
+        },
+
+        async clearMakerWorldCookies() {
+            try {
+                await api.savePrinterSettings({
+                    moonraker_url: this.printerSettings.moonraker_url || '',
+                    makerworld_cookies: '',
+                });
+                this.hasMakerWorldCookies = false;
+            } catch (err) {
+                console.warn('Failed to clear MakerWorld cookies:', err);
             }
         },
 

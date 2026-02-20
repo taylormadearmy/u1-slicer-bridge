@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#4F46E5"/>
+  <g transform="translate(256,240)">
+    <!-- Build plate -->
+    <rect x="-140" y="60" width="280" height="16" rx="4" fill="white" opacity="0.9"/>
+    <!-- 3D cube on plate -->
+    <polygon points="0,-80 -70,-40 -70,30 0,70 70,30 70,-40" fill="white" opacity="0.25"/>
+    <polygon points="0,-80 -70,-40 0,-0 70,-40" fill="white" opacity="0.6"/>
+    <polygon points="0,0 -70,-40 -70,30 0,70" fill="white" opacity="0.4"/>
+    <polygon points="0,0 70,-40 70,30 0,70" fill="white" opacity="0.3"/>
+    <!-- Slice lines -->
+    <line x1="-70" y1="-10" x2="70" y2="-10" stroke="#4F46E5" stroke-width="2.5" opacity="0.7"/>
+    <line x1="-70" y1="10" x2="70" y2="10" stroke="#4F46E5" stroke-width="2.5" opacity="0.7"/>
+    <line x1="-70" y1="30" x2="70" y2="30" stroke="#4F46E5" stroke-width="2.5" opacity="0.7"/>
+  </g>
+  <!-- U1 text -->
+  <text x="256" y="420" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="bold" font-size="72" fill="white" opacity="0.9">U1 SLICER</text>
+</svg>

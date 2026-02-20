@@ -11,6 +11,7 @@ from db import init_db, close_db, get_pg_pool
 from moonraker import init_moonraker, close_moonraker, get_moonraker, set_moonraker_url
 from routes_upload import router as upload_router
 from routes_slice import router as slice_router
+from routes_makerworld import router as makerworld_router
 
 
 async def _auto_init_filaments():
@@ -78,6 +79,7 @@ app.add_middleware(
 # Include routers
 app.include_router(upload_router)
 app.include_router(slice_router)
+app.include_router(makerworld_router)
 
 
 @app.get("/")
@@ -156,31 +158,71 @@ async def get_printer_settings():
     """Get printer connection settings."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT moonraker_url FROM printer_settings WHERE id = 1")
-    return {"moonraker_url": row["moonraker_url"] if row else None}
+        row = await conn.fetchrow("SELECT moonraker_url, makerworld_cookies, makerworld_enabled FROM printer_settings WHERE id = 1")
+    return {
+        "moonraker_url": row["moonraker_url"] if row else None,
+        "has_makerworld_cookies": bool(row["makerworld_cookies"]) if row else False,
+        "makerworld_enabled": bool(row["makerworld_enabled"]) if row else False,
+    }
 
 
 class PrinterSettingsUpdate(BaseModel):
     moonraker_url: Optional[str] = None
+    makerworld_cookies: Optional[str] = None
+    makerworld_enabled: Optional[bool] = None
 
 @app.put("/printer/settings")
 async def update_printer_settings(body: PrinterSettingsUpdate):
     """Save printer connection settings and reconnect."""
     pool = get_pg_pool()
     url = (body.moonraker_url or "").strip() or None
+    # Distinguish: None = not sent (preserve), "" = explicit clear, "value" = new cookies
+    sent_cookies = body.makerworld_cookies is not None
+    mw_cookies = body.makerworld_cookies.strip() if body.makerworld_cookies else None
 
     async with pool.acquire() as conn:
-        await conn.execute(
-            """INSERT INTO printer_settings (id, moonraker_url, updated_at)
-               VALUES (1, $1, NOW())
-               ON CONFLICT (id) DO UPDATE SET moonraker_url = $1, updated_at = NOW()""",
-            url,
-        )
+        if sent_cookies:
+            # User explicitly sent cookies (new value or empty = clear)
+            await conn.execute(
+                """INSERT INTO printer_settings (id, moonraker_url, makerworld_cookies, updated_at)
+                   VALUES (1, $1, $2, NOW())
+                   ON CONFLICT (id) DO UPDATE SET moonraker_url = $1, makerworld_cookies = $2, updated_at = NOW()""",
+                url,
+                mw_cookies,
+            )
+            has_cookies = bool(mw_cookies)
+        else:
+            # No cookies field — preserve existing cookies
+            await conn.execute(
+                """INSERT INTO printer_settings (id, moonraker_url, updated_at)
+                   VALUES (1, $1, NOW())
+                   ON CONFLICT (id) DO UPDATE SET moonraker_url = $1, updated_at = NOW()""",
+                url,
+            )
+            row = await conn.fetchrow("SELECT makerworld_cookies FROM printer_settings WHERE id = 1")
+            has_cookies = bool(row and row["makerworld_cookies"])
+
+        # Update makerworld_enabled if explicitly sent
+        if body.makerworld_enabled is not None:
+            await conn.execute(
+                "UPDATE printer_settings SET makerworld_enabled = $1 WHERE id = 1",
+                body.makerworld_enabled,
+            )
 
     # Reconnect (or disconnect) the global Moonraker client
     await set_moonraker_url(url or "")
 
-    return {"moonraker_url": url, "message": "Saved"}
+    # Read back current makerworld_enabled
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT makerworld_enabled FROM printer_settings WHERE id = 1")
+    mw_enabled = bool(row and row["makerworld_enabled"])
+
+    return {
+        "moonraker_url": url,
+        "has_makerworld_cookies": has_cookies,
+        "makerworld_enabled": mw_enabled,
+        "message": "Saved",
+    }
 
 
 # ---------------------------------------------------------------------------

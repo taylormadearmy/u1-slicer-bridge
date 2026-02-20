@@ -4,11 +4,22 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>U1 Slicer Bridge</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233b82f6'/%3E%3Cstop offset='1' stop-color='%231d4ed8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='6' fill='url(%23g)'/%3E%3Cpath d='M8 22h16M9 18h14M10 14h12M12 10h8' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+    <meta name="theme-color" content="#4F46E5">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/icon.svg">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+    <link rel="apple-touch-icon" href="/icon-192.png">
     <!-- Vendored 3D libraries (LAN-first, no CDN) — Three.js r159 + gcode-preview v2.18.0 -->
     <script src="lib/three.min.js"></script>
     <script src="lib/gcode-preview.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+    </script>
     <script src="https://cdn.tailwindcss.com/3.4.0"></script>
     <style>
         [x-cloak] { display: none !important; }
@@ -133,6 +144,94 @@
                         </div>
                         <p class="text-xs text-gray-500 mt-2" x-show="uploadPhase === 'processing'">Large or multi-plate files can take around 30s to become ready.</p>
                     </div>
+                </section>
+
+                <!-- MakerWorld Import (only shown when enabled in Settings) -->
+                <section x-show="makerWorldEnabled" x-cloak class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+                    <h2 class="text-lg md:text-xl font-semibold mb-4">Import from MakerWorld</h2>
+                    <p class="text-sm text-gray-500 mb-4">Paste a MakerWorld link to import a model directly.</p>
+
+                    <!-- URL Input -->
+                    <div class="flex gap-2">
+                        <input
+                            type="url"
+                            x-model="makerWorldUrl"
+                            @keydown.enter="lookupMakerWorld()"
+                            placeholder="https://makerworld.com/models/..."
+                            class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                            :disabled="makerWorldLoading || makerWorldDownloading">
+                        <button
+                            @click="lookupMakerWorld()"
+                            :disabled="!makerWorldUrl.trim() || makerWorldLoading || makerWorldDownloading"
+                            class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition whitespace-nowrap">
+                            <span x-show="!makerWorldLoading">Look Up</span>
+                            <span x-show="makerWorldLoading" class="flex items-center gap-1">
+                                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path></svg>
+                                Looking up...
+                            </span>
+                        </button>
+                    </div>
+
+                    <!-- Model Preview Card -->
+                    <template x-if="makerWorldModel">
+                        <div class="mt-4 border border-indigo-200 rounded-lg bg-indigo-50 p-4">
+                            <div class="flex gap-4">
+                                <!-- Thumbnail -->
+                                <template x-if="makerWorldModel.thumbnail">
+                                    <img :src="makerWorldModel.thumbnail" class="w-24 h-24 rounded-lg object-cover flex-shrink-0 bg-gray-200" alt="Model preview">
+                                </template>
+                                <template x-if="!makerWorldModel.thumbnail">
+                                    <div class="w-24 h-24 rounded-lg bg-gray-200 flex-shrink-0 flex items-center justify-center">
+                                        <svg class="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                                    </div>
+                                </template>
+
+                                <!-- Info -->
+                                <div class="flex-1 min-w-0">
+                                    <h3 class="font-semibold text-gray-900 truncate" x-text="makerWorldModel.title"></h3>
+                                    <p class="text-sm text-gray-500 mt-0.5" x-text="'by ' + makerWorldModel.author"></p>
+
+                                    <!-- Profile selector -->
+                                    <template x-if="makerWorldModel.profiles && makerWorldModel.profiles.length > 1">
+                                        <div class="mt-2">
+                                            <label class="text-xs font-medium text-gray-600">Print Profile</label>
+                                            <select x-model.number="makerWorldSelectedProfile"
+                                                    class="mt-0.5 w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white">
+                                                <template x-for="profile in makerWorldModel.profiles" :key="profile.instance_id">
+                                                    <option :value="profile.instance_id" x-text="profile.title"></option>
+                                                </template>
+                                            </select>
+                                        </div>
+                                    </template>
+                                    <template x-if="makerWorldModel.profiles && makerWorldModel.profiles.length === 1">
+                                        <p class="text-xs text-gray-500 mt-2" x-text="makerWorldModel.profiles[0].title"></p>
+                                    </template>
+                                    <template x-if="!makerWorldModel.profiles || makerWorldModel.profiles.length === 0">
+                                        <p class="text-xs text-yellow-700 mt-2">No downloadable profiles found for this model.</p>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <!-- Action buttons -->
+                            <div class="mt-3 flex gap-2">
+                                <button
+                                    @click="downloadMakerWorld()"
+                                    :disabled="!makerWorldSelectedProfile || makerWorldDownloading"
+                                    class="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+                                    <span x-show="!makerWorldDownloading">Download & Import</span>
+                                    <span x-show="makerWorldDownloading" class="flex items-center justify-center gap-1">
+                                        <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path></svg>
+                                        Downloading...
+                                    </span>
+                                </button>
+                                <button @click="clearMakerWorld()"
+                                        class="px-3 py-2 text-gray-600 bg-white border border-gray-300 rounded-lg text-sm hover:bg-gray-50 transition"
+                                        :disabled="makerWorldDownloading">
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </template>
                 </section>
             </div>
 
@@ -970,6 +1069,65 @@
             <p x-show="!printerSettings.moonraker_url" x-cloak class="text-xs text-gray-400 mt-2">
                 Not configured. Set a Moonraker URL to enable "Send to Printer".
             </p>
+        </section>
+
+        <!-- Settings: MakerWorld Integration -->
+        <section class="bg-white p-4 md:p-6 mb-0 border-b border-gray-100">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg md:text-xl font-semibold">MakerWorld Integration</h2>
+                <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" x-model="makerWorldEnabled" class="sr-only peer">
+                    <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                    <span class="ms-2 text-sm text-gray-600" x-text="makerWorldEnabled ? 'Enabled' : 'Disabled'"></span>
+                </label>
+            </div>
+            <p x-show="!makerWorldEnabled" x-cloak class="text-xs text-gray-400">
+                Enable to import models directly from MakerWorld links.
+            </p>
+            <template x-if="makerWorldEnabled">
+            <div>
+            <p class="text-xs text-gray-500 mb-3">
+                Add your MakerWorld session cookies to enable unlimited downloads.
+                Without cookies, downloads are limited to ~5 per IP.
+            </p>
+            <div class="mb-3">
+                <div class="flex items-center gap-2 mb-2">
+                    <label class="block text-xs text-gray-500">Session Cookies</label>
+                    <span x-show="hasMakerWorldCookies" x-cloak
+                          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                        Configured
+                    </span>
+                    <button x-show="hasMakerWorldCookies" x-cloak
+                            @click="clearMakerWorldCookies()"
+                            class="text-xs text-red-500 hover:text-red-700 hover:underline">
+                        Clear
+                    </button>
+                    <span x-show="!hasMakerWorldCookies" x-cloak
+                          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">
+                        Not configured
+                    </span>
+                </div>
+                <textarea x-model="printerSettings.makerworld_cookies"
+                          :placeholder="hasMakerWorldCookies ? 'Cookies saved. Paste new cookies here to update.' : 'Paste your Cookie header value here...'"
+                          rows="3"
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono text-xs resize-none"></textarea>
+            </div>
+            <details class="text-xs text-gray-400">
+                <summary class="cursor-pointer hover:text-gray-600">How to get your cookies</summary>
+                <ol class="mt-2 ml-4 list-decimal space-y-1 text-gray-500">
+                    <li>Log in to <a href="https://makerworld.com" target="_blank" class="text-indigo-600 hover:underline">makerworld.com</a> in your browser</li>
+                    <li>Press <strong>F12</strong> to open Developer Tools</li>
+                    <li>Go to the <strong>Network</strong> tab and check <strong>Preserve log</strong></li>
+                    <li>Navigate to any model page on MakerWorld</li>
+                    <li>Click the <strong>Doc</strong> filter button to show page requests only</li>
+                    <li>Click the first <strong>makerworld.com</strong> request in the list</li>
+                    <li>Scroll down in <strong>Request Headers</strong> and find the <strong>Cookie</strong> header</li>
+                    <li>Right-click the Cookie value &rarr; <strong>Copy value</strong> and paste it above</li>
+                </ol>
+                <p class="mt-2 text-gray-400">Cookies are stored securely on your server and never sent to the browser. They will expire periodically and need to be refreshed.</p>
+            </details>
+            </div>
+            </template>
         </section>
 
         <!-- Settings: Printer Defaults -->

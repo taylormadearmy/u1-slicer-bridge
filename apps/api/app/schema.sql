@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS printer_settings (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_printer_settings_single_row CHECK (id = 1)
 );
+ALTER TABLE printer_settings ADD COLUMN IF NOT EXISTS makerworld_cookies TEXT;
+ALTER TABLE printer_settings ADD COLUMN IF NOT EXISTS makerworld_enabled BOOLEAN DEFAULT false;
 
 -- ============================================================================
 -- OLD WORKFLOW CLEANUP (already migrated)

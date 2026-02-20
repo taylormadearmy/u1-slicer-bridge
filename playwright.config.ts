@@ -13,7 +13,7 @@ export default defineConfig({
   workers: 1,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://localhost:8080',
+    baseURL: 'http://localhost:8234',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     actionTimeout: 15_000,
@@ -28,7 +28,7 @@ export default defineConfig({
   /* Ensure Docker services are running before tests */
   webServer: {
     command: 'curl -sf http://localhost:8000/healthz > /dev/null',
-    url: 'http://localhost:8080',
+    url: 'http://localhost:8234',
     reuseExistingServer: true,
     timeout: 5_000,
   },
