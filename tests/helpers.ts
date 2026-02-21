@@ -9,6 +9,8 @@ const UPLOAD_TRANSITION_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 180_000 : 60_000;
 const UPLOAD_LIST_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 90_000 : 30_000;
 const CONFIGURE_STEP_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 90_000 : 30_000;
 const API_UPLOAD_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 180_000 : 60_000;
+const API_SLICE_REQUEST_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 240_000 : 120_000;
+const API_SLICE_POLL_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 240_000 : 120_000;
 
 /** Wait for Alpine.js to fully initialize the app */
 export async function waitForApp(page: Page) {
@@ -166,7 +168,7 @@ export async function apiSlice(
   };
   const res = await request.post(`${API}/uploads/${uploadId}/slice`, {
     data,
-    timeout: 120_000,
+    timeout: API_SLICE_REQUEST_TIMEOUT_MS,
   });
   expect(res.ok()).toBe(true);
   const job = await res.json();
@@ -191,7 +193,7 @@ export async function apiSlicePlate(
   };
   const res = await request.post(`${API}/uploads/${uploadId}/slice-plate`, {
     data,
-    timeout: 120_000,
+    timeout: API_SLICE_REQUEST_TIMEOUT_MS,
   });
   expect(res.ok()).toBe(true);
   const job = await res.json();
@@ -205,7 +207,7 @@ export async function waitForJobComplete(request: APIRequestContext, job: any) {
   const jobId = job.job_id;
   let delay = 500;
   const maxDelay = 2_000;
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + API_SLICE_POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, delay));
     const statusRes = await request.get(`${API}/jobs/${jobId}`, { timeout: 30_000 });
