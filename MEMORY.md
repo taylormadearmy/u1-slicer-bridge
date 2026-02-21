@@ -97,3 +97,11 @@ Orca requires string arrays: `["200"]` not `[200]`. Wrap with `str()`.
 ### Database
 asyncpg can't handle multi-statement SQL. Schema split into individual statements in `db.py`.
 Runtime schema migration via `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
+
+## Pi Arm64 Playwright Timeout Tuning (2026-02-21)
+- **Symptom**: `test:fast` on Raspberry Pi timed out at exactly 120s on large multi-plate/multicolour uploads even after helper timeout increases.
+- **Cause**: Playwright global per-test timeout remained fixed at `120_000`, capping slower arm64 runs before helper-level waits could complete.
+- **Fix**: `playwright.config.ts` now uses adaptive test timeout:
+  - `240_000` for arm64, non-localhost base URLs, or `PLAYWRIGHT_SLOW_ENV=1`
+  - `120_000` for standard local runs
+- **Files**: `playwright.config.ts`
