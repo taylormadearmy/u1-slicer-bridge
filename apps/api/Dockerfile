@@ -35,23 +35,24 @@ RUN apt-get update && apt-get install -y \
    libwebkit2gtk-4.1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Snapmaker OrcaSlicer Flatpak bundle from GitHub Releases (multi-arch)
+# Install Snapmaker OrcaSlicer Flatpak bundle from GitHub Releases (multi-arch).
+# Deterministic note: this path avoids adding external remotes (e.g. Flathub)
+# so builds depend only on pinned Debian packages + pinned Snapmaker release URL.
 RUN set -eux; \
+   ORCA_VERSION_NUM="${SNAPMAKER_ORCA_VERSION#v}"; \
    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
       amd64) \
          FLATPAK_ARCH="x86_64"; \
-         ORCA_BUNDLE_URL="https://github.com/Snapmaker/OrcaSlicer/releases/download/${SNAPMAKER_ORCA_VERSION}/Snapmaker_Orca-Linux-flatpak_V2.2.4_x86_64_Beta.flatpak"; \
+         ORCA_BUNDLE_URL="https://github.com/Snapmaker/OrcaSlicer/releases/download/${SNAPMAKER_ORCA_VERSION}/Snapmaker_Orca-Linux-flatpak_V${ORCA_VERSION_NUM}_x86_64_Beta.flatpak"; \
          ;; \
       arm64) \
          FLATPAK_ARCH="aarch64"; \
-         ORCA_BUNDLE_URL="https://github.com/Snapmaker/OrcaSlicer/releases/download/${SNAPMAKER_ORCA_VERSION}/Snapmaker_Orca-Linux-flatpak_V2.2.4_aarch64_Beta.flatpak"; \
+         ORCA_BUNDLE_URL="https://github.com/Snapmaker/OrcaSlicer/releases/download/${SNAPMAKER_ORCA_VERSION}/Snapmaker_Orca-Linux-flatpak_V${ORCA_VERSION_NUM}_aarch64_Beta.flatpak"; \
          ;; \
       *) echo "Unsupported architecture: ${TARGETARCH:-$(dpkg --print-architecture)}"; exit 1 ;; \
    esac; \
    wget -O /tmp/orca-slicer.flatpak "${ORCA_BUNDLE_URL}"; \
-   flatpak remote-add --if-not-exists flathub \
-      https://flathub.org/repo/flathub.flatpakrepo; \
-   flatpak install --system --noninteractive --arch="${FLATPAK_ARCH}" \
+   flatpak install --system --noninteractive --arch="${FLATPAK_ARCH}" --no-deps \
       /tmp/orca-slicer.flatpak; \
    ORCA_BINARY_PATH="$(find /var/lib/flatpak/app -type f -path '*/files/bin/snapmaker-orca' | head -n 1)"; \
    test -n "${ORCA_BINARY_PATH}"; \

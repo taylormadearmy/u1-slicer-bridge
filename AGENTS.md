@@ -109,6 +109,7 @@ Everything runs via compose.
 
 ### Snapmaker OrcaSlicer fork
 Use Snapmaker's v2.2.4 fork for Bambu file compatibility.
+When packaging via Flatpak bundles, avoid adding moving external remotes (for example Flathub) during Docker builds; install only pinned Snapmaker release bundles to keep builds reproducible.
 
 ### Preserve plate arrangements
 Never normalize objects - preserve MakerWorld/Bambu layouts.
