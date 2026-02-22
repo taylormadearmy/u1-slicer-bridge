@@ -16,8 +16,8 @@ test.describe('Multicolour Support', () => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     const colors = await getAppState(page, 'detectedColors') as string[];
     if (colors.length >= 2) {
-      // Colours & Filaments accordion should be visible and open by default
-      await expect(page.getByText(/Colours & Filaments/i)).toBeVisible();
+      // Colours/Filaments accordion should be visible.
+      await expect(page.getByText(/Colours.*Filaments/i)).toBeVisible();
       // Color mapping lines should be visible (arrow between detected colour and extruder)
       await expect(page.getByText('->').first()).toBeVisible();
     }
@@ -28,10 +28,10 @@ test.describe('Multicolour Support', () => {
     const colors = await getAppState(page, 'detectedColors') as string[];
 
     if (colors.length >= 2) {
-      // Accordion starts closed — summary should be visible
-      await expect(page.getByText(/Colours & Filaments/i)).toBeVisible();
+      // Accordion starts closed - summary should be visible.
+      await expect(page.getByText(/Colours.*Filaments/i)).toBeVisible();
       // Open the accordion
-      await page.getByText(/Colours & Filaments/i).click();
+      await page.getByText(/Colours.*Filaments/i).click();
       // Extruder override section should now be visible
       await expect(page.getByText(/Filament\/Extruder Override/i)).toBeVisible({ timeout: 3_000 });
       // Customise link should be present
@@ -55,7 +55,7 @@ test.describe('Multicolour Support', () => {
   });
 
   test('file with >4 colors maps extras to available extruders', async ({ page }) => {
-    // Dragon Scale has 7 metadata colors — extras should be mapped to E1-E4
+    // Dragon Scale has 7 metadata colors - extras should map to E1-E4.
     await uploadFile(page, 'Dragon Scale infinity.3mf');
     // Wait for plates to load using Alpine v3 API
     await page.waitForFunction(() => {
@@ -73,7 +73,7 @@ test.describe('Multicolour Support', () => {
     const assignments = await getAppState(page, 'sliceSettings.extruder_assignments') as number[];
     const filaments = await getAppState(page, 'selectedFilaments') as any[];
 
-    // No rejection notice — >4 colors are now handled
+    // No rejection notice - >4 colors are now handled.
     expect(notice).toBeNull();
     // All detected colors preserved
     expect(colors.length).toBeGreaterThanOrEqual(1);
@@ -94,3 +94,4 @@ test.describe('Multicolour Support', () => {
     expect(upload.detected_colors.length).toBeGreaterThanOrEqual(2);
   });
 });
+

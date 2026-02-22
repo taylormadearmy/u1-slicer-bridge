@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import Optional, List
+from datetime import datetime, timezone
 import json
 import os
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +13,7 @@ from db import init_db, close_db, get_pg_pool
 from moonraker import init_moonraker, close_moonraker, get_moonraker, set_moonraker_url
 from routes_upload import router as upload_router
 from routes_slice import router as slice_router
+from routes_makerworld import router as makerworld_router
 
 
 async def _auto_init_filaments():
@@ -78,6 +81,7 @@ app.add_middleware(
 # Include routers
 app.include_router(upload_router)
 app.include_router(slice_router)
+app.include_router(makerworld_router)
 
 
 @app.get("/")
@@ -156,31 +160,71 @@ async def get_printer_settings():
     """Get printer connection settings."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT moonraker_url FROM printer_settings WHERE id = 1")
-    return {"moonraker_url": row["moonraker_url"] if row else None}
+        row = await conn.fetchrow("SELECT moonraker_url, makerworld_cookies, makerworld_enabled FROM printer_settings WHERE id = 1")
+    return {
+        "moonraker_url": row["moonraker_url"] if row else None,
+        "has_makerworld_cookies": bool(row["makerworld_cookies"]) if row else False,
+        "makerworld_enabled": bool(row["makerworld_enabled"]) if row else False,
+    }
 
 
 class PrinterSettingsUpdate(BaseModel):
     moonraker_url: Optional[str] = None
+    makerworld_cookies: Optional[str] = None
+    makerworld_enabled: Optional[bool] = None
 
 @app.put("/printer/settings")
 async def update_printer_settings(body: PrinterSettingsUpdate):
     """Save printer connection settings and reconnect."""
     pool = get_pg_pool()
     url = (body.moonraker_url or "").strip() or None
+    # Distinguish: None = not sent (preserve), "" = explicit clear, "value" = new cookies
+    sent_cookies = body.makerworld_cookies is not None
+    mw_cookies = body.makerworld_cookies.strip() if body.makerworld_cookies else None
 
     async with pool.acquire() as conn:
-        await conn.execute(
-            """INSERT INTO printer_settings (id, moonraker_url, updated_at)
-               VALUES (1, $1, NOW())
-               ON CONFLICT (id) DO UPDATE SET moonraker_url = $1, updated_at = NOW()""",
-            url,
-        )
+        if sent_cookies:
+            # User explicitly sent cookies (new value or empty = clear)
+            await conn.execute(
+                """INSERT INTO printer_settings (id, moonraker_url, makerworld_cookies, updated_at)
+                   VALUES (1, $1, $2, NOW())
+                   ON CONFLICT (id) DO UPDATE SET moonraker_url = $1, makerworld_cookies = $2, updated_at = NOW()""",
+                url,
+                mw_cookies,
+            )
+            has_cookies = bool(mw_cookies)
+        else:
+            # No cookies field — preserve existing cookies
+            await conn.execute(
+                """INSERT INTO printer_settings (id, moonraker_url, updated_at)
+                   VALUES (1, $1, NOW())
+                   ON CONFLICT (id) DO UPDATE SET moonraker_url = $1, updated_at = NOW()""",
+                url,
+            )
+            row = await conn.fetchrow("SELECT makerworld_cookies FROM printer_settings WHERE id = 1")
+            has_cookies = bool(row and row["makerworld_cookies"])
+
+        # Update makerworld_enabled if explicitly sent
+        if body.makerworld_enabled is not None:
+            await conn.execute(
+                "UPDATE printer_settings SET makerworld_enabled = $1 WHERE id = 1",
+                body.makerworld_enabled,
+            )
 
     # Reconnect (or disconnect) the global Moonraker client
     await set_moonraker_url(url or "")
 
-    return {"moonraker_url": url, "message": "Saved"}
+    # Read back current makerworld_enabled
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT makerworld_enabled FROM printer_settings WHERE id = 1")
+    mw_enabled = bool(row and row["makerworld_enabled"])
+
+    return {
+        "moonraker_url": url,
+        "has_makerworld_cookies": has_cookies,
+        "makerworld_enabled": mw_enabled,
+        "message": "Saved",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1180,3 +1224,262 @@ async def init_default_filaments():
                 pass
 
         return {"message": "Default filaments initialized"}
+
+
+# -----------------------------------------------------------------------
+# Settings Backup & Restore
+# -----------------------------------------------------------------------
+
+@app.get("/settings/export")
+async def export_settings():
+    """Export all settings as a downloadable JSON file."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
+
+        # Printer settings
+        printer_row = await conn.fetchrow("SELECT moonraker_url, makerworld_enabled FROM printer_settings WHERE id = 1")
+        printer = {
+            "moonraker_url": printer_row["moonraker_url"] if printer_row else "",
+            "makerworld_enabled": printer_row["makerworld_enabled"] if printer_row else False,
+        } if printer_row else {"moonraker_url": "", "makerworld_enabled": False}
+
+        # Filaments (exclude id, created_at — not portable)
+        fil_rows = await conn.fetch(
+            "SELECT name, material, nozzle_temp, bed_temp, print_speed, bed_type, "
+            "color_hex, is_default, source_type, density, slicer_settings "
+            "FROM filaments ORDER BY id"
+        )
+        filaments = []
+        for r in fil_rows:
+            f = dict(r)
+            # Parse slicer_settings JSON if present
+            if f.get("slicer_settings"):
+                try:
+                    f["slicer_settings"] = json.loads(f["slicer_settings"])
+                except (json.JSONDecodeError, TypeError):
+                    f["slicer_settings"] = None
+            filaments.append(f)
+
+        # Extruder presets (resolve filament_id → filament_name)
+        preset_rows = await conn.fetch(
+            "SELECT ep.slot, ep.color_hex, f.name AS filament_name "
+            "FROM extruder_presets ep "
+            "LEFT JOIN filaments f ON ep.filament_id = f.id "
+            "ORDER BY ep.slot"
+        )
+        extruder_presets = [
+            {"slot": r["slot"], "filament_name": r["filament_name"], "color_hex": r["color_hex"]}
+            for r in preset_rows
+        ]
+
+        # Slicing defaults
+        sd_row = await conn.fetchrow(
+            "SELECT layer_height, infill_density, wall_count, infill_pattern, "
+            "supports, support_type, support_threshold_angle, "
+            "brim_type, brim_width, brim_object_gap, "
+            "skirt_loops, skirt_distance, skirt_height, "
+            "enable_prime_tower, prime_volume, prime_tower_width, "
+            "prime_tower_brim_width, prime_tower_brim_chamfer, prime_tower_brim_chamfer_max_width, "
+            "nozzle_temp, bed_temp, bed_type, setting_modes, enable_flow_calibrate "
+            "FROM slicing_defaults WHERE id = 1"
+        )
+        slicing_defaults = {}
+        if sd_row:
+            slicing_defaults = dict(sd_row)
+            if slicing_defaults.get("setting_modes"):
+                try:
+                    slicing_defaults["setting_modes"] = json.loads(slicing_defaults["setting_modes"])
+                except (json.JSONDecodeError, TypeError):
+                    slicing_defaults["setting_modes"] = {}
+
+    backup = {
+        "version": 1,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "app_version": os.getenv("APP_VERSION", "dev"),
+        "settings": {
+            "printer": printer,
+            "filaments": filaments,
+            "extruder_presets": extruder_presets,
+            "slicing_defaults": slicing_defaults,
+        },
+    }
+
+    content = json.dumps(backup, indent=2, default=str)
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="u1-slicer-settings-{date_str}.json"'},
+    )
+
+
+@app.post("/settings/import")
+async def import_settings(file: UploadFile = File(...)):
+    """Restore settings from an exported JSON backup file."""
+    # Size guard (1MB max)
+    raw = await file.read()
+    if len(raw) > 1_048_576:
+        raise HTTPException(400, "Backup file too large (max 1MB)")
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid JSON file")
+
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise HTTPException(400, "Unsupported backup format or version")
+
+    settings = data.get("settings", {})
+    pool = get_pg_pool()
+
+    filaments_imported = 0
+    async with pool.acquire() as conn:
+        await _ensure_filament_schema(conn)
+        async with conn.transaction():
+            # 1. Import filaments (upsert by name)
+            for f in settings.get("filaments", []):
+                name = f.get("name")
+                if not name:
+                    continue
+                slicer_settings = f.get("slicer_settings")
+                if slicer_settings and isinstance(slicer_settings, dict):
+                    slicer_settings = json.dumps(slicer_settings)
+                elif slicer_settings and not isinstance(slicer_settings, str):
+                    slicer_settings = None
+
+                await conn.execute(
+                    """
+                    INSERT INTO filaments (name, material, nozzle_temp, bed_temp, print_speed,
+                        bed_type, color_hex, is_default, source_type, density, slicer_settings)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (name) DO UPDATE SET
+                        material = EXCLUDED.material,
+                        nozzle_temp = EXCLUDED.nozzle_temp,
+                        bed_temp = EXCLUDED.bed_temp,
+                        print_speed = EXCLUDED.print_speed,
+                        bed_type = EXCLUDED.bed_type,
+                        color_hex = EXCLUDED.color_hex,
+                        is_default = EXCLUDED.is_default,
+                        source_type = EXCLUDED.source_type,
+                        density = EXCLUDED.density,
+                        slicer_settings = EXCLUDED.slicer_settings
+                    """,
+                    name,
+                    f.get("material", "PLA"),
+                    f.get("nozzle_temp", 200),
+                    f.get("bed_temp", 60),
+                    f.get("print_speed", 200),
+                    f.get("bed_type", "PEI"),
+                    f.get("color_hex", "#FFFFFF"),
+                    f.get("is_default", False),
+                    f.get("source_type", "manual"),
+                    f.get("density", 1.24),
+                    slicer_settings,
+                )
+                filaments_imported += 1
+
+            # 2. Import extruder presets (resolve filament_name → filament_id)
+            for ep in settings.get("extruder_presets", []):
+                slot = ep.get("slot")
+                if not slot or slot < 1 or slot > 4:
+                    continue
+                filament_id = None
+                if ep.get("filament_name"):
+                    row = await conn.fetchrow(
+                        "SELECT id FROM filaments WHERE name = $1", ep["filament_name"]
+                    )
+                    if row:
+                        filament_id = row["id"]
+                await conn.execute(
+                    """
+                    INSERT INTO extruder_presets (slot, filament_id, color_hex)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (slot) DO UPDATE SET
+                        filament_id = EXCLUDED.filament_id,
+                        color_hex = EXCLUDED.color_hex
+                    """,
+                    slot, filament_id, ep.get("color_hex", "#FFFFFF"),
+                )
+
+            # 3. Import slicing defaults
+            sd = settings.get("slicing_defaults", {})
+            if sd:
+                setting_modes = sd.get("setting_modes")
+                if isinstance(setting_modes, dict):
+                    setting_modes = json.dumps(setting_modes)
+                elif not isinstance(setting_modes, str):
+                    setting_modes = None
+
+                await conn.execute(
+                    """
+                    UPDATE slicing_defaults SET
+                        layer_height = COALESCE($1, layer_height),
+                        infill_density = COALESCE($2, infill_density),
+                        wall_count = COALESCE($3, wall_count),
+                        infill_pattern = COALESCE($4, infill_pattern),
+                        supports = COALESCE($5, supports),
+                        support_type = $6,
+                        support_threshold_angle = $7,
+                        brim_type = $8,
+                        brim_width = $9,
+                        brim_object_gap = $10,
+                        skirt_loops = $11,
+                        skirt_distance = $12,
+                        skirt_height = $13,
+                        enable_prime_tower = COALESCE($14, enable_prime_tower),
+                        prime_volume = $15,
+                        prime_tower_width = $16,
+                        prime_tower_brim_width = $17,
+                        prime_tower_brim_chamfer = COALESCE($18, prime_tower_brim_chamfer),
+                        prime_tower_brim_chamfer_max_width = $19,
+                        nozzle_temp = $20,
+                        bed_temp = $21,
+                        bed_type = $22,
+                        setting_modes = COALESCE($23, setting_modes),
+                        enable_flow_calibrate = COALESCE($24, enable_flow_calibrate),
+                        updated_at = NOW()
+                    WHERE id = 1
+                    """,
+                    sd.get("layer_height"),
+                    sd.get("infill_density"),
+                    sd.get("wall_count"),
+                    sd.get("infill_pattern"),
+                    sd.get("supports"),
+                    sd.get("support_type"),
+                    sd.get("support_threshold_angle"),
+                    sd.get("brim_type"),
+                    sd.get("brim_width"),
+                    sd.get("brim_object_gap"),
+                    sd.get("skirt_loops"),
+                    sd.get("skirt_distance"),
+                    sd.get("skirt_height"),
+                    sd.get("enable_prime_tower"),
+                    sd.get("prime_volume"),
+                    sd.get("prime_tower_width"),
+                    sd.get("prime_tower_brim_width"),
+                    sd.get("prime_tower_brim_chamfer"),
+                    sd.get("prime_tower_brim_chamfer_max_width"),
+                    sd.get("nozzle_temp"),
+                    sd.get("bed_temp"),
+                    sd.get("bed_type"),
+                    setting_modes,
+                    sd.get("enable_flow_calibrate"),
+                )
+
+            # 4. Import printer settings (preserve cookies)
+            printer = settings.get("printer", {})
+            if printer:
+                await conn.execute(
+                    """
+                    UPDATE printer_settings SET
+                        moonraker_url = COALESCE($1, moonraker_url),
+                        makerworld_enabled = COALESCE($2, makerworld_enabled),
+                        updated_at = NOW()
+                    WHERE id = 1
+                    """,
+                    printer.get("moonraker_url"),
+                    printer.get("makerworld_enabled"),
+                )
+
+    return {"success": True, "filaments_imported": filaments_imported}

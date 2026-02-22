@@ -11,6 +11,12 @@ const BASELINE_FILE = path.join(__dirname, '.test-baseline');
  */
 export default async function globalTeardown() {
   try {
+    if (process.env.TEST_CLEANUP_UPLOADS !== '1') {
+      if (fs.existsSync(BASELINE_FILE)) fs.unlinkSync(BASELINE_FILE);
+      console.log('\n🛡️ Skipping upload cleanup (set TEST_CLEANUP_UPLOADS=1 to enable).\n');
+      return;
+    }
+
     let baselineId = 0;
     if (fs.existsSync(BASELINE_FILE)) {
       baselineId = parseInt(fs.readFileSync(BASELINE_FILE, 'utf-8'), 10) || 0;

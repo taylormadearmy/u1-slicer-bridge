@@ -80,9 +80,32 @@ function app() {
         printerStatus: 'Checking...',
 
         // Printer settings (for Settings modal)
-        printerSettings: { moonraker_url: '' },
+        printerSettings: { moonraker_url: '', makerworld_cookies: '' },
+        hasMakerWorldCookies: false,
+        makerWorldEnabled: false,
         printerSettingsSaving: false,
         printerTestResult: null,
+
+        // Backup & Restore
+        settingsExporting: false,
+        settingsImporting: false,
+        settingsImportFile: null,
+        settingsBackupMessage: null,
+        settingsBackupOk: false,
+
+        // MakerWorld import
+        makerWorldUrl: '',
+        makerWorldLoading: false,
+        makerWorldDownloading: false,
+        makerWorldModel: null,         // { design_id, title, author, thumbnail, profiles }
+        makerWorldSelectedProfile: null, // instance_id
+
+        // Multiple copies (M32)
+        copyCount: 1,
+        copySelectValue: '1',
+        copyCountInput: null,
+        copiesApplying: false,
+        copyGridInfo: null,  // { cols, rows, fits_bed, max_copies }
 
         // Print monitor
         printMonitorActive: false,
@@ -174,6 +197,36 @@ function app() {
 
             // Set up periodic printer status check
             setInterval(() => this.checkPrinterStatus(), 30000); // Every 30 seconds
+
+            // Handle PWA share target — auto-populate MakerWorld URL if shared
+            this._handleShareTarget();
+        },
+
+        _handleShareTarget() {
+            const params = new URLSearchParams(window.location.search);
+            if (!params.get('share')) return;
+
+            // Extract URL from share params (Android puts URL in 'text' or 'url')
+            const sharedUrl = params.get('url') || params.get('text') || '';
+            const makerWorldUrl = this._extractMakerWorldUrl(sharedUrl);
+
+            // Clean the URL bar (remove query params)
+            window.history.replaceState({}, '', '/');
+
+            if (makerWorldUrl && this.makerWorldEnabled) {
+                this.makerWorldUrl = makerWorldUrl;
+                this.lookupMakerWorld();
+            } else if (makerWorldUrl && !this.makerWorldEnabled) {
+                // Shared a MakerWorld URL but feature is disabled
+                this.errorMessage = 'MakerWorld integration is disabled. Enable it in Settings to import shared links.';
+            }
+        },
+
+        _extractMakerWorldUrl(text) {
+            if (!text) return null;
+            // Find a MakerWorld URL anywhere in the shared text
+            const match = text.match(/https?:\/\/(?:www\.)?makerworld\.com\/[^\s]*/i);
+            return match ? match[0] : null;
         },
 
         /**
@@ -969,7 +1022,114 @@ function app() {
             }
         },
 
-/**
+        // ----- MakerWorld Import -----
+
+        /**
+         * Look up a MakerWorld model by URL
+         */
+        async lookupMakerWorld() {
+            const url = (this.makerWorldUrl || '').trim();
+            if (!url) return;
+
+            this.makerWorldLoading = true;
+            this.makerWorldModel = null;
+            this.makerWorldSelectedProfile = null;
+            this.error = null;
+
+            try {
+                const result = await api.lookupMakerWorld(url);
+                this.makerWorldModel = result;
+                // Auto-select first profile
+                if (result.profiles && result.profiles.length > 0) {
+                    this.makerWorldSelectedProfile = result.profiles[0].instance_id;
+                }
+            } catch (err) {
+                this.showError(`MakerWorld lookup failed: ${err.message}`);
+            } finally {
+                this.makerWorldLoading = false;
+            }
+        },
+
+        /**
+         * Download a 3MF from MakerWorld and import it
+         */
+        async downloadMakerWorld() {
+            if (!this.makerWorldModel || !this.makerWorldSelectedProfile) return;
+
+            this.makerWorldDownloading = true;
+            this.error = null;
+
+            try {
+                const result = await api.downloadMakerWorld(
+                    this.makerWorldUrl.trim(),
+                    this.makerWorldSelectedProfile
+                );
+
+                // Feed into the same post-upload flow as manual uploads
+                this.uploads.unshift(result);
+                this.selectedUpload = result;
+                this.selectedPlate = null;
+                this.plates = [];
+                this.platesLoading = false;
+                this.activeTab = 'upload';
+
+                if (this.filaments.length === 0) {
+                    await this.loadFilaments();
+                }
+
+                this.filamentOverride = false;
+                this.applyDetectedColors(result.detected_colors || []);
+                this.resetJobOverrideSettings();
+                this.currentStep = 'configure';
+
+                // Load plate info
+                this.platesLoading = true;
+                this.plates = [];
+                try {
+                    const platesData = await api.getUploadPlates(result.upload_id);
+                    this.platesLoading = false;
+
+                    if (platesData.is_multi_plate && platesData.plates && platesData.plates.length > 0) {
+                        this.selectedUpload.is_multi_plate = true;
+                        this.selectedUpload.plate_count = platesData.plate_count;
+                        this.plates = platesData.plates;
+                    } else {
+                        this.selectedUpload.is_multi_plate = false;
+                        this.plates = [];
+                    }
+
+                    const fps = platesData.file_print_settings || result.file_print_settings;
+                    this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
+                    if (this.fileSettings) this.applyFileSettings(this.fileSettings);
+                } catch (err) {
+                    this.platesLoading = false;
+                    this.selectedUpload.is_multi_plate = false;
+                    this.plates = [];
+                    const fps = result.file_print_settings;
+                    this.fileSettings = fps && Object.keys(fps).length > 0 ? fps : null;
+                    if (this.fileSettings) this.applyFileSettings(this.fileSettings);
+                }
+
+                // Reset MakerWorld state
+                this.makerWorldModel = null;
+                this.makerWorldUrl = '';
+                this.makerWorldSelectedProfile = null;
+            } catch (err) {
+                this.showError(`MakerWorld download failed: ${err.message}`);
+            } finally {
+                this.makerWorldDownloading = false;
+            }
+        },
+
+        clearMakerWorld() {
+            this.makerWorldUrl = '';
+            this.makerWorldModel = null;
+            this.makerWorldSelectedProfile = null;
+            this.makerWorldLoading = false;
+            this.makerWorldDownloading = false;
+        },
+
+        /**
          * Select an existing upload (from recent uploads list)
          */
         async selectUpload(upload) {
@@ -1087,6 +1247,52 @@ function app() {
                 this.detectedColors = plate.detected_colors;
             }
             console.log('Selected plate:', plateId);
+        },
+
+        // ---------------------------------------------------------------
+        // Multiple Copies (M32)
+        // ---------------------------------------------------------------
+
+        async applyCopies(n) {
+            n = parseInt(n, 10);
+            if (!n || n < 1 || n > 100 || !this.selectedUpload) return;
+            if (n === this.copyCount) return;
+
+            this.copiesApplying = true;
+            this.copyGridInfo = null;
+            try {
+                if (n === 1) {
+                    // Reset to single copy
+                    await fetch(`/api/upload/${this.selectedUpload.upload_id}/copies`, { method: 'DELETE' });
+                    this.copyCount = 1;
+                    this.copySelectValue = '1';
+                    this.copyGridInfo = null;
+                } else {
+                    const response = await fetch(`/api/upload/${this.selectedUpload.upload_id}/copies`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ copies: n, spacing: 5.0 }),
+                    });
+                    if (!response.ok) {
+                        const err = await response.json().catch(() => ({ detail: 'Failed' }));
+                        this.showError(err.detail || 'Failed to apply copies');
+                        // Revert select to current copyCount
+                        this.copySelectValue = [1, 2, 4, 6, 9].includes(this.copyCount) ? String(this.copyCount) : 'custom';
+                        return;
+                    }
+                    const result = await response.json();
+                    this.copyCount = n;
+                    this.copySelectValue = [1, 2, 4, 6, 9].includes(n) ? String(n) : 'custom';
+                    this.copyGridInfo = result;
+                    if (!result.fits_bed) {
+                        this.showError(`${n} copies may exceed the build plate. Consider fewer copies.`);
+                    }
+                }
+            } catch (err) {
+                this.showError(`Copies failed: ${err.message}`);
+            } finally {
+                this.copiesApplying = false;
+            }
         },
 
         /**
@@ -1294,6 +1500,7 @@ function app() {
             this.selectedUpload = null;
             this.fileSettings = null;
             this.sliceResult = null;
+            this.clearMakerWorld();
             this.sliceProgress = 0;
             this.uploadProgress = 0;
             this.uploadPhase = 'idle';
@@ -1302,6 +1509,11 @@ function app() {
             this.printMonitorActive = false;
             this.printSending = false;
             this.printState = null;
+            this.copyCount = 1;
+            this.copySelectValue = '1';
+            this.copyCountInput = null;
+            this.copiesApplying = false;
+            this.copyGridInfo = null;
 
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
@@ -1312,7 +1524,7 @@ function app() {
         /**
          * Return to configure step with all settings preserved (for reslicing).
          */
-        goBackToConfigure() {
+        async goBackToConfigure() {
             this.sliceResult = null;
             this.sliceProgress = 0;
             this.currentStep = 'configure';
@@ -1321,6 +1533,47 @@ function app() {
             if (this.sliceInterval) {
                 clearInterval(this.sliceInterval);
                 this.sliceInterval = null;
+            }
+
+            // Rehydrate upload details when returning from complete view.
+            // This preserves multicolour metadata even if selectedUpload was
+            // populated from a job record that lacks detected_colors/file_size.
+            const uploadId = this.selectedUpload?.upload_id;
+            if (!uploadId) return;
+
+            try {
+                const [uploadDetails, platesData] = await Promise.all([
+                    api.getUpload(uploadId).catch(() => null),
+                    api.getUploadPlates(uploadId).catch(() => null),
+                ]);
+
+                if (uploadDetails) {
+                    this.selectedUpload = { ...this.selectedUpload, ...uploadDetails };
+
+                    const serverColors = uploadDetails.detected_colors || [];
+                    const missingColors = !this.detectedColors || this.detectedColors.length === 0;
+                    const downgradedColors =
+                        serverColors.length > 1 &&
+                        ((this.detectedColors?.length || 0) <= 1 || (this.selectedFilaments?.length || 0) <= 1);
+
+                    if (missingColors || downgradedColors) {
+                        if (this.filaments.length === 0) {
+                            await this.loadFilaments();
+                        }
+                        this.applyDetectedColors(serverColors);
+                    }
+                }
+
+                if (platesData && platesData.is_multi_plate && Array.isArray(platesData.plates)) {
+                    this.selectedUpload.is_multi_plate = true;
+                    this.selectedUpload.plate_count = platesData.plate_count;
+                    this.plates = platesData.plates;
+                } else if (this.selectedUpload) {
+                    this.selectedUpload.is_multi_plate = false;
+                    this.plates = [];
+                }
+            } catch (err) {
+                console.warn('Failed to rehydrate upload after returning to configure:', err);
             }
         },
 
@@ -1717,7 +1970,12 @@ function app() {
         async loadPrinterSettings() {
             try {
                 const data = await api.getPrinterSettings();
-                this.printerSettings = { moonraker_url: data.moonraker_url || '' };
+                this.printerSettings = {
+                    moonraker_url: data.moonraker_url || '',
+                    makerworld_cookies: '',  // never returned by API (sensitive)
+                };
+                this.hasMakerWorldCookies = data.has_makerworld_cookies || false;
+                this.makerWorldEnabled = data.makerworld_enabled || false;
             } catch (err) {
                 console.warn('Failed to load printer settings:', err);
             }
@@ -1727,7 +1985,20 @@ function app() {
             this.printerSettingsSaving = true;
             this.printerTestResult = null;
             try {
-                await api.savePrinterSettings({ moonraker_url: this.printerSettings.moonraker_url || '' });
+                const payload = {
+                    moonraker_url: this.printerSettings.moonraker_url || '',
+                    makerworld_enabled: this.makerWorldEnabled,
+                };
+                // Only send cookies if user typed something new (field is blank on load for security)
+                if (this.printerSettings.makerworld_cookies) {
+                    payload.makerworld_cookies = this.printerSettings.makerworld_cookies;
+                }
+                await api.savePrinterSettings(payload);
+                // Update cookie status indicator
+                if (this.printerSettings.makerworld_cookies) {
+                    this.hasMakerWorldCookies = true;
+                    this.printerSettings.makerworld_cookies = '';  // clear from memory after save
+                }
                 this.printerTestResult = { ok: true, message: 'Saved' };
                 // Refresh header status after URL change
                 await this.checkPrinterStatus();
@@ -1736,6 +2007,81 @@ function app() {
             } finally {
                 this.printerSettingsSaving = false;
                 setTimeout(() => { this.printerTestResult = null; }, 4000);
+            }
+        },
+
+        async clearMakerWorldCookies() {
+            try {
+                await api.savePrinterSettings({
+                    moonraker_url: this.printerSettings.moonraker_url || '',
+                    makerworld_cookies: '',
+                });
+                this.hasMakerWorldCookies = false;
+            } catch (err) {
+                console.warn('Failed to clear MakerWorld cookies:', err);
+            }
+        },
+
+        // ---------------------------------------------------------------
+        // Backup & Restore
+        // ---------------------------------------------------------------
+
+        async exportSettings() {
+            this.settingsExporting = true;
+            this.settingsBackupMessage = null;
+            try {
+                const response = await fetch('/api/settings/export');
+                if (!response.ok) throw new Error(`Export failed: HTTP ${response.status}`);
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const date = new Date().toISOString().slice(0, 10);
+                a.download = `u1-slicer-settings-${date}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                this.settingsBackupOk = true;
+                this.settingsBackupMessage = 'Settings exported successfully.';
+            } catch (err) {
+                this.settingsBackupOk = false;
+                this.settingsBackupMessage = `Export failed: ${err.message}`;
+            } finally {
+                this.settingsExporting = false;
+                setTimeout(() => { this.settingsBackupMessage = null; }, 5000);
+            }
+        },
+
+        async importSettings() {
+            if (!this.settingsImportFile) return;
+            this.settingsImporting = true;
+            this.settingsBackupMessage = null;
+            try {
+                const formData = new FormData();
+                formData.append('file', this.settingsImportFile);
+                const response = await fetch('/api/settings/import', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({ detail: 'Import failed' }));
+                    throw new Error(err.detail || `HTTP ${response.status}`);
+                }
+                const result = await response.json();
+                // Reload all settings from DB
+                await this.loadFilaments();
+                await this.loadExtruderPresets();
+                await this.loadPrinterSettings();
+                this.settingsBackupOk = true;
+                this.settingsBackupMessage = `Settings restored: ${result.filaments_imported} filaments, presets & defaults updated.`;
+                this.settingsImportFile = null;
+            } catch (err) {
+                this.settingsBackupOk = false;
+                this.settingsBackupMessage = `Import failed: ${err.message}`;
+            } finally {
+                this.settingsImporting = false;
+                setTimeout(() => { this.settingsBackupMessage = null; }, 8000);
             }
         },
 

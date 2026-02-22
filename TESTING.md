@@ -11,10 +11,10 @@
 ### Running Tests
 
 ```bash
-# Fast regression (84 tests, includes calicube slice sanity, ~5 min) — use for everyday dev
+# Fast regression (110 tests, includes calicube slice sanity, ~5 min) — use for everyday dev
 npm run test:fast
 
-# Full suite (122 tests, includes slicing, ~60 min) — use before pushing to GH
+# Full suite (148 tests, includes slicing, ~60 min) — use before pushing to GH
 npm test
 
 # Quick smoke tests only (~15 seconds)
@@ -33,6 +33,8 @@ npm run test:settings          # Settings modal, presets, filament CRUD
 npm run test:files             # File management (upload/job delete)
 npm run test:errors            # Error handling and edge cases
 npm run test:file-settings     # File-level print settings detection
+npm run test:copies            # Multiple copies grid layout and overlap prevention
+npm run test:backup            # Settings backup/restore import/export
 
 # View HTML test report
 npm run test:report
@@ -61,6 +63,9 @@ tests/
   file-settings.spec.ts     File-level print settings detection
   settings.spec.ts          Settings modal, printer defaults, filament library, presets
   errors.spec.ts            Error handling, edge cases, delete safety
+  stl-upload.spec.ts        STL upload, wrapping, and slicing
+  copies.spec.ts            Multiple copies grid, overlap prevention, dropdown UI
+  backup-restore.spec.ts    Settings backup/restore export/import
 ```
 
 ### Test Fixtures
@@ -97,6 +102,9 @@ Test 3MF files live in `test-data/`:
 | slice-plate | Slow | Yes | Individual plate slicing |
 | multicolour-slice | Slow | Yes | Multi-colour slicing workflow |
 | viewer | Slow | Yes | 3D viewer (WebGL), layer controls, API |
+| stl-upload | Medium | Yes | STL upload, wrapping, slicing |
+| copies | Medium | Yes* | Grid layout, overlap prevention, dropdown UI |
+| backup | Fast | No | Settings export/import round-trip |
 
 *file-management deletes test data created during the test
 
@@ -126,7 +134,7 @@ Before submitting changes, verify these still work:
 
 ---
 
-## API Endpoints (37 total)
+## API Endpoints (43 total)
 
 ### Health & Status
 | Method | Endpoint | Description |
@@ -197,6 +205,15 @@ Before submitting changes, verify these still work:
 | GET | `/presets/extruders` | Get extruder presets and slicing defaults |
 | PUT | `/presets/extruders` | Save extruder presets and slicing defaults |
 | GET | `/presets/orca-defaults` | Get Orca process profile defaults for UI hints |
+| GET | `/presets/backup` | Export all settings (filaments, presets, defaults) as JSON |
+| POST | `/presets/restore` | Import settings from JSON backup |
+
+### Copies (multiple object duplication)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/upload/{id}/copies/info` | Get object dimensions, max copies estimate, current count |
+| POST | `/upload/{id}/copies` | Apply N copies with grid layout (body: `{copies, spacing}`) |
+| DELETE | `/upload/{id}/copies` | Reset to single copy |
 
 ---
 
@@ -274,3 +291,16 @@ Typical timing for a simple cube:
 - Slicing: 30-60 seconds (depends on complexity)
 - Multi-plate parsing: ~30 seconds for large files (3-4MB)
 - Viewer metadata extraction: 1-2 seconds
+
+## Recent Testing Notes (2026-02-21)
+
+- Cleanup safety: test upload/job cleanup is now opt-in.
+- Default test runs preserve uploads/jobs in shared instances.
+- Enable cleanup explicitly when needed:
+
+```bash
+TEST_CLEANUP_UPLOADS=1 npm test
+```
+
+- Browser regression coverage for the scaling-spacing fix exists in
+  `tests/copies.spec.ts` (`browser flow: scale increases full assembly XY footprint`).

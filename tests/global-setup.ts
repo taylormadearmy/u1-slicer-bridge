@@ -13,6 +13,12 @@ const BASELINE_FILE = path.join(__dirname, '.test-baseline');
  * slow to start (baseline 0 would delete everything).
  */
 export default async function globalSetup() {
+  if (process.env.TEST_CLEANUP_UPLOADS !== '1') {
+    // Cleanup is opt-in. Keep a sentinel baseline so teardown can skip safely.
+    fs.writeFileSync(BASELINE_FILE, '-1');
+    return;
+  }
+
   let maxId = 0;
   const maxRetries = 10;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {

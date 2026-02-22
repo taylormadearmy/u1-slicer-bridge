@@ -22,10 +22,41 @@ from profile_embedder import ProfileEmbedder, ProfileEmbedError
 from multi_plate_parser import parse_multi_plate_3mf, extract_plate_objects, get_plate_bounds
 from plate_validator import PlateValidator
 from parser_3mf import detect_colors_from_3mf, detect_colors_per_plate, detect_print_settings, extract_3mf_metadata_batch
+from scale_3mf import apply_uniform_scale_to_3mf, apply_layout_scale_to_3mf
 
 
 router = APIRouter(tags=["slicing"])
 logger = logging.getLogger(__name__)
+INT32_MAX = 2_147_483_647
+
+
+def _is_wipe_tower_conflict(result: Dict[str, object]) -> bool:
+    """Detect Orca wipe-tower conflict failures from CLI output."""
+    stdout = str(result.get("stdout") or "").lower()
+    stderr = str(result.get("stderr") or "").lower()
+    combined = f"{stdout}\n{stderr}"
+    return (
+        "gcode path conflicts found between wipetower" in combined
+        or "found slicing result conflict" in combined
+    )
+
+
+async def _apply_scale_if_needed(
+    input_3mf: Path,
+    workspace: Path,
+    scale_percent: float,
+    job_logger: logging.Logger,
+    suffix: str = "",
+) -> Path:
+    """Apply uniform scale when requested; otherwise return original file."""
+    if abs(scale_percent - 100.0) < 0.001:
+        return input_3mf
+
+    safe_suffix = f"_{suffix}" if suffix else ""
+    scaled_path = workspace / f"{input_3mf.stem}_scaled{safe_suffix}.3mf"
+    job_logger.info(f"Applying object scale: {scale_percent:.1f}%")
+    await asyncio.to_thread(apply_uniform_scale_to_3mf, input_3mf, scaled_path, scale_percent)
+    return scaled_path
 
 
 def _index_preview_assets(source_3mf: Path) -> Dict[str, object]:
@@ -113,6 +144,13 @@ def get_filament_ids(request) -> List[int]:
         raise HTTPException(status_code=400, detail="filament_id or filament_ids required")
 
 
+def _clamp_int32(value: Optional[int]) -> Optional[int]:
+    """Clamp integer values to PostgreSQL INTEGER range used by schema."""
+    if value is None:
+        return None
+    return max(0, min(int(value), INT32_MAX))
+
+
 class SliceRequest(BaseModel):
     filament_ids: Optional[List[int]] = None  # Multi-filament support (list of filament IDs)
     filament_id: Optional[int] = None  # Single filament (for backward compatibility)
@@ -139,6 +177,7 @@ class SliceRequest(BaseModel):
     nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
     bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
+    scale_percent: Optional[float] = Field(100.0, ge=10.0, le=500.0)
     enable_flow_calibrate: Optional[bool] = True
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
@@ -170,6 +209,7 @@ class SlicePlateRequest(BaseModel):
     nozzle_temp: Optional[int] = Field(None, ge=150, le=350)
     bed_temp: Optional[int] = Field(None, ge=0, le=150)
     bed_type: Optional[str] = None
+    scale_percent: Optional[float] = Field(100.0, ge=10.0, le=500.0)
     enable_flow_calibrate: Optional[bool] = True
     extruder_assignments: Optional[List[int]] = None  # Per-color target extruder slots (0-based)
 
@@ -259,6 +299,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
         f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
         f"infill_pattern={request.infill_pattern}, supports={request.supports}, "
+        f"scale_percent={request.scale_percent}, "
         f"enable_prime_tower={request.enable_prime_tower}, "
         f"prime_volume={request.prime_volume}, "
         f"prime_tower_width={request.prime_tower_width}, "
@@ -271,7 +312,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Validate upload exists
         upload = await conn.fetchrow(
             """
-            SELECT id, filename, file_path, bounds_warning, detected_colors
+            SELECT id, filename, file_path, bounds_warning, detected_colors,
+                   copies_path, copies_count, copies_spacing
             FROM uploads
             WHERE id = $1
             """,
@@ -318,8 +360,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         filament_names = [f["name"] for f in filaments]
         job_logger.info(f"Using filaments: {', '.join(filament_names)}")
 
-        # Check original 3MF file exists
+        # Always use the ORIGINAL file for profile embedding and metadata.
+        # Copies are re-applied AFTER embedding to avoid trimesh destroying
+        # the multi-item layout (Bambu files get trimesh-processed during embedding).
         source_3mf = Path(upload["file_path"])
+        copies_count = upload["copies_count"] or 1
+        copies_spacing = upload["copies_spacing"] or 5.0
+        if copies_count > 1:
+            job_logger.info(f"Will apply {copies_count} copies (spacing={copies_spacing}mm) after embedding")
         if not source_3mf.exists():
             job_logger.error(f"Source 3MF file not found: {source_3mf}")
             raise HTTPException(status_code=500, detail="Source 3MF file not found")
@@ -395,7 +443,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Embed profiles into original 3MF
         job_logger.info("Embedding Orca profiles into original 3MF...")
         embedder = ProfileEmbedder(Path("/app/orca_profiles"))
-        embedded_3mf = workspace / "sliceable.3mf"
+        embedded_3mf = workspace / "embedded.3mf"
 
         # Prepare filament settings for multi-extruder
         # Orca expects temperatures as arrays of strings
@@ -499,7 +547,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["skirt_distance"] = str(request.skirt_distance)
         if request.skirt_height is not None:
             overrides["skirt_height"] = str(request.skirt_height)
-        if request.enable_prime_tower:
+        # Auto-enable prime tower for multi-color copies: without it, the slicer
+        # dumps purge/wipe material around the objects creating visible artifacts.
+        need_prime_tower = request.enable_prime_tower
+        if copies_count > 1 and extruder_count > 1 and not need_prime_tower:
+            need_prime_tower = True
+            job_logger.info("Auto-enabling prime tower for multi-color copies")
+
+        if need_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
                 overrides["prime_volume"] = str(max(0, int(request.prime_volume)))
@@ -543,8 +598,134 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         job_logger.info("Invoking Orca Slicer...")
         printer_profile = get_printer_profile("snapmaker_u1")
         slicer = OrcaSlicer(printer_profile)
+        scale_percent = float(request.scale_percent if request.scale_percent is not None else 100.0)
+        scale_factor = scale_percent / 100.0
+        scale_active = abs(scale_percent - 100.0) > 0.001
+        layout_scale_active = scale_percent > 100.001
 
-        result = await slicer.slice_3mf_async(embedded_3mf, workspace)
+        source_for_slice = embedded_3mf
+        if layout_scale_active:
+            # Native --scale can miss component/matrix offsets in some files.
+            # Pre-scale only layout offsets so spacing scales with the same factor.
+            source_for_slice = workspace / "embedded_layout_scaled.3mf"
+            await asyncio.to_thread(
+                apply_layout_scale_to_3mf,
+                embedded_3mf,
+                source_for_slice,
+                scale_percent,
+            )
+            job_logger.info("Applied pre-scale to assembly offsets for native --scale")
+
+        # Apply copies if needed.
+        if copies_count > 1:
+            from copy_duplicator import apply_copies_to_3mf
+            sliceable_3mf = workspace / "sliceable.3mf"
+            copy_result = await asyncio.to_thread(
+                apply_copies_to_3mf,
+                source_for_slice,
+                sliceable_3mf,
+                copies_count,
+                copies_spacing,
+                scale_factor,
+            )
+            job_logger.info(f"Applied {copies_count} copies: {copy_result['cols']}x{copy_result['rows']} grid")
+            if not copy_result.get("fits_bed", True):
+                raise SlicingError(
+                    f"{copies_count} copies at {scale_percent:.0f}% scale do not fit build plate. "
+                    "Reduce copies or scale."
+                )
+        else:
+            sliceable_3mf = source_for_slice
+
+        result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=scale_factor)
+
+        if not result["success"] and scale_active:
+            job_logger.warning("Native --scale failed; retrying with transform-based scaling")
+            # Re-scale from the original embedded file to avoid double-applying
+            # layout offsets when source_for_slice already has pre-scaled spacing.
+            scaled_3mf = await _apply_scale_if_needed(embedded_3mf, workspace, scale_percent, job_logger)
+            if copies_count > 1:
+                from copy_duplicator import apply_copies_to_3mf
+                fallback_sliceable_3mf = workspace / "sliceable_scaled_fallback.3mf"
+                copy_result = await asyncio.to_thread(
+                    apply_copies_to_3mf,
+                    scaled_3mf,
+                    fallback_sliceable_3mf,
+                    copies_count,
+                    copies_spacing,
+                    1.0,
+                )
+                if not copy_result.get("fits_bed", True):
+                    raise SlicingError(
+                        f"{copies_count} copies at {scale_percent:.0f}% scale do not fit build plate. "
+                        "Reduce copies or scale."
+                    )
+            else:
+                fallback_sliceable_3mf = scaled_3mf
+            result = await slicer.slice_3mf_async(fallback_sliceable_3mf, workspace, scale_factor=1.0)
+
+        if (
+            not result["success"]
+            and scale_active
+            and scale_percent < 100.0
+        ):
+            job_logger.warning(
+                "Scaled downslice failed; retrying once at 100% scale"
+            )
+            result = await slicer.slice_3mf_async(sliceable_3mf, workspace, scale_factor=1.0)
+
+        if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
+            job_logger.warning(
+                "Detected wipe-tower path conflict; retrying once with prime tower disabled"
+            )
+            retry_overrides = dict(overrides)
+            retry_overrides["enable_prime_tower"] = "0"
+
+            embedded_retry = workspace / "embedded_no_prime.3mf"
+            await embedder.embed_profiles_async(
+                source_3mf=source_3mf,
+                output_3mf=embedded_retry,
+                filament_settings=filament_settings,
+                overrides=retry_overrides,
+                requested_filament_count=extruder_count,
+                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                preserve_geometry=True,
+                precomputed_is_bambu=file_meta["is_bambu"],
+                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
+                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
+            )
+
+            retry_source = embedded_retry
+            if layout_scale_active:
+                retry_source = workspace / "embedded_no_prime_layout_scaled.3mf"
+                await asyncio.to_thread(
+                    apply_layout_scale_to_3mf,
+                    embedded_retry,
+                    retry_source,
+                    scale_percent,
+                )
+
+            if copies_count > 1:
+                from copy_duplicator import apply_copies_to_3mf
+                retry_sliceable_3mf = workspace / "sliceable_no_prime.3mf"
+                copy_result = await asyncio.to_thread(
+                    apply_copies_to_3mf,
+                    retry_source,
+                    retry_sliceable_3mf,
+                    copies_count,
+                    copies_spacing,
+                    scale_factor,
+                )
+                if not copy_result.get("fits_bed", True):
+                    raise SlicingError(
+                        f"{copies_count} copies at {scale_percent:.0f}% scale do not fit build plate. "
+                        "Reduce copies or scale."
+                    )
+            else:
+                retry_sliceable_3mf = retry_source
+
+            result = await slicer.slice_3mf_async(retry_sliceable_3mf, workspace, scale_factor=scale_factor)
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -582,6 +763,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         # Parse G-code metadata (async to avoid blocking event loop)
         job_logger.info("Parsing G-code metadata...")
         metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
+        metadata["estimated_time_seconds"] = _clamp_int32(metadata.get("estimated_time_seconds")) or 0
+        metadata["layer_count"] = _clamp_int32(metadata.get("layer_count"))
         used_tools = await asyncio.to_thread(slicer.get_used_tools, gcode_workspace_path)
         job_logger.info(f"Tools used in G-code: {used_tools}")
 
@@ -702,7 +885,10 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 datetime.utcnow(),
                 err_text
             )
-        code = 400 if "unstable for this model" in err_text else 500
+        low = err_text.lower()
+        code = 500
+        if "unstable for this model" in low or "do not fit build plate" in low:
+            code = 400
         raise HTTPException(status_code=code, detail=f"Slicing failed: {err_text}")
 
     except Exception as e:
@@ -752,6 +938,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         f"Request: filament_id={request.filament_id}, layer_height={request.layer_height}, "
         f"infill_density={request.infill_density}, wall_count={request.wall_count}, "
         f"infill_pattern={request.infill_pattern}, supports={request.supports}, "
+        f"scale_percent={request.scale_percent}, "
         f"enable_prime_tower={request.enable_prime_tower}, "
         f"prime_volume={request.prime_volume}, "
         f"prime_tower_width={request.prime_tower_width}, "
@@ -774,6 +961,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         if not upload:
             job_logger.error(f"Upload {upload_id} not found")
             raise HTTPException(status_code=404, detail="Upload not found")
+
+        # Copies don't apply to plate-based slicing
+        copies_count = 1
 
         # Check if this is a multi-plate file
         source_3mf = Path(upload["file_path"])
@@ -1013,7 +1203,14 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["skirt_distance"] = str(request.skirt_distance)
         if request.skirt_height is not None:
             overrides["skirt_height"] = str(request.skirt_height)
-        if request.enable_prime_tower:
+        # Auto-enable prime tower for multi-color copies: without it, the slicer
+        # dumps purge/wipe material around the objects creating visible artifacts.
+        need_prime_tower = request.enable_prime_tower
+        if copies_count > 1 and extruder_count > 1 and not need_prime_tower:
+            need_prime_tower = True
+            job_logger.info("Auto-enabling prime tower for multi-color copies")
+
+        if need_prime_tower:
             overrides["enable_prime_tower"] = "1"
             if request.prime_volume is not None:
                 overrides["prime_volume"] = str(max(0, int(request.prime_volume)))
@@ -1053,6 +1250,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         # Slice with Orca (async to avoid blocking other API requests)
         job_logger.info("Invoking Orca Slicer...")
         slicer = OrcaSlicer(printer_profile)
+        scale_percent = float(request.scale_percent if request.scale_percent is not None else 100.0)
 
         # Bambu files define plates via Metadata/plate_*.json, not <item> indices.
         # Our multi_plate_parser maps each <item> to a "plate" (1-indexed), but
@@ -1067,7 +1265,78 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             )
             effective_plate_id = 1
 
-        result = await slicer.slice_3mf_async(embedded_3mf, workspace, plate_index=effective_plate_id)
+        scale_factor = scale_percent / 100.0
+        scale_active = abs(scale_percent - 100.0) > 0.001
+        layout_scale_active = scale_percent > 100.001
+        source_for_slice = embedded_3mf
+        if layout_scale_active:
+            source_for_slice = workspace / "embedded_layout_scaled.3mf"
+            await asyncio.to_thread(
+                apply_layout_scale_to_3mf,
+                embedded_3mf,
+                source_for_slice,
+                scale_percent,
+            )
+            job_logger.info("Applied pre-scale to assembly offsets for native --scale")
+
+        result = await slicer.slice_3mf_async(
+            source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=scale_factor
+        )
+
+        if not result["success"] and scale_active:
+            job_logger.warning("Native --scale failed; retrying with transform-based scaling")
+            # Re-scale from the original embedded file to avoid double-applying
+            # layout offsets when source_for_slice already has pre-scaled spacing.
+            scaled_3mf = await _apply_scale_if_needed(embedded_3mf, workspace, scale_percent, job_logger)
+            result = await slicer.slice_3mf_async(
+                scaled_3mf, workspace, plate_index=effective_plate_id, scale_factor=1.0
+            )
+
+        if (
+            not result["success"]
+            and scale_active
+            and scale_percent < 100.0
+        ):
+            job_logger.warning(
+                "Scaled downslice failed; retrying once at 100% scale"
+            )
+            result = await slicer.slice_3mf_async(
+                source_for_slice, workspace, plate_index=effective_plate_id, scale_factor=1.0
+            )
+
+        if not result["success"] and need_prime_tower and _is_wipe_tower_conflict(result):
+            job_logger.warning(
+                "Detected wipe-tower path conflict; retrying once with prime tower disabled"
+            )
+            retry_overrides = dict(overrides)
+            retry_overrides["enable_prime_tower"] = "0"
+
+            embedded_retry = workspace / "embedded_no_prime.3mf"
+            await embedder.embed_profiles_async(
+                source_3mf=source_3mf,
+                output_3mf=embedded_retry,
+                filament_settings=filament_settings,
+                overrides=retry_overrides,
+                requested_filament_count=extruder_count,
+                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                preserve_geometry=True,
+                precomputed_is_bambu=file_meta["is_bambu"],
+                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
+                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
+            )
+            retry_source = embedded_retry
+            if layout_scale_active:
+                retry_source = workspace / "embedded_no_prime_layout_scaled.3mf"
+                await asyncio.to_thread(
+                    apply_layout_scale_to_3mf,
+                    embedded_retry,
+                    retry_source,
+                    scale_percent,
+                )
+            result = await slicer.slice_3mf_async(
+                retry_source, workspace, plate_index=effective_plate_id, scale_factor=scale_factor
+            )
 
         if not result["success"]:
             job_logger.error(f"Orca Slicer failed with exit code {result['exit_code']}")
@@ -1105,6 +1374,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         # Parse G-code metadata (async to avoid blocking event loop)
         job_logger.info("Parsing G-code metadata...")
         metadata = await asyncio.to_thread(slicer.parse_gcode_metadata, gcode_workspace_path)
+        metadata["estimated_time_seconds"] = _clamp_int32(metadata.get("estimated_time_seconds")) or 0
+        metadata["layer_count"] = _clamp_int32(metadata.get("layer_count"))
         used_tools = await asyncio.to_thread(slicer.get_used_tools, gcode_workspace_path)
         job_logger.info(f"Tools used in G-code: {used_tools}")
 

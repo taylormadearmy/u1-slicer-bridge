@@ -441,6 +441,35 @@ class ApiClient {
     }
 
     // -----------------------------------------------------------------------
+    // MakerWorld Integration
+    // -----------------------------------------------------------------------
+
+    /**
+     * Look up a MakerWorld model by URL
+     * @param {string} url - MakerWorld model URL
+     * @returns {Promise<{design_id, title, author, thumbnail, profiles}>}
+     */
+    async lookupMakerWorld(url) {
+        return this.fetch('/makerworld/lookup', {
+            method: 'POST',
+            body: JSON.stringify({ url }),
+        });
+    }
+
+    /**
+     * Download a 3MF from MakerWorld and process it
+     * @param {string} url - MakerWorld model URL
+     * @param {number} instanceId - Profile/instance ID to download
+     * @returns {Promise<{upload_id, filename, ...}>} Same as upload response
+     */
+    async downloadMakerWorld(url, instanceId) {
+        return this.fetch('/makerworld/download', {
+            method: 'POST',
+            body: JSON.stringify({ url, instance_id: instanceId }),
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Printer Settings & Print Control
     // -----------------------------------------------------------------------
 

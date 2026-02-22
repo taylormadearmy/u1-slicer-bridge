@@ -11,6 +11,36 @@
 - **Files**: `apps/api/Dockerfile`, `THIRD-PARTY-LICENSES.md`
 - **Note**: API Dockerfile now resolves `fdm_process_common.json` dynamically from the Flatpak installation path.
 
+## Configure Back-Nav Multicolour State Loss (2026-02-20)
+
+### Symptom
+- After slicing a multicolour file and clicking `Back to configure`, configure view could lose multicolour assignments and show fallback single-filament summary.
+- In some paths, selected file size showed `0.00 MB` after returning.
+
+### Root Cause
+- Complete-step navigation could rely on partially populated `selectedUpload` state (job-origin context), without rehydrating authoritative upload metadata (`detected_colors`, `file_size`).
+
+### Fix
+- `app.js::goBackToConfigure()` now rehydrates upload data via `GET /upload/{id}` and plates via `GET /uploads/{id}/plates`.
+- Re-applies detected colors only when color state is missing/downgraded, preserving normal configured state while restoring broken cases.
+- Added regression test: `tests/slicing.spec.ts` â€” `back to configure preserves multicolour state`.
+
+## Upload Progress Stuck at 0% (2026-02-20)
+
+### Symptom
+- Some clients showed `Uploading... 0%` indefinitely during file upload instead of progressing to `Preparing file`.
+
+### Root Cause
+- Service worker intercepted all requests (including multipart `POST /api/upload`), which can stall upload streams on certain browser/device combinations.
+
+### Fix
+- `apps/web/sw.js` now only intercepts same-origin `GET` requests.
+- Non-GET requests (including upload POSTs) bypass the service worker completely.
+
+### Regression
+- `npm run test:smoke` passed.
+- `npm run test:upload` passed.
+
 ## 3D G-code Viewer (M12) — 2026-02-17
 
 ### Implementation
@@ -47,6 +77,54 @@
 - Replaced trimesh with XML vertex scanning for upload-time bounds
 - `_calculate_xml_bounds()` scans `<vertex>` elements directly
 - trimesh still used at slice time for Bambu geometry rebuild
+
+## Copies Grid Overlap Fix (2026-02-20)
+
+### Root Cause
+`_scan_object_bounds()` in `multi_plate_parser.py` scanned vertex bounds from each component's mesh but never applied the component transform offsets. Both components of the dual-colour cube referenced the same mesh, so combined bounds equaled one cube's bounds (10mm), ignoring the +/-7.455mm assembly offsets. Actual footprint is 24.9mm wide.
+
+### Fix
+Parse each component's `transform` attribute and apply translation offsets to vertex bounds before combining. Also auto-enables prime tower for multi-color copies.
+
+### Regression Tests
+- `copies.spec.ts`: "multi-component assembly dimensions account for component offsets" (width >20mm)
+- `copies.spec.ts`: "copies grid has no overlapping objects" (grid cell spacing > object size)
+
+## Scale Overlap Fix (2026-02-21)
+
+### Symptom
+- At high scale (for example `500%`) the dual-colour calicube could show its two model blocks overlapping in preview.
+- Users observed Z growth, but XY internal spacing did not grow proportionally.
+
+### Root Cause
+- `apply_layout_scale_to_3mf()` only scaled `Metadata/model_settings.config` matrix metadata.
+- The same assembly offsets also exist in `3D/3dmodel.model` as `<component transform="...">`, and those were left unchanged.
+- Snapmaker Orca path used those unscaled component transforms, so inter-component spacing stayed near original.
+
+### Fix
+- `apps/api/app/scale_3mf.py` now scales component transforms in `3D/3dmodel.model` during layout scaling.
+- Fallback uniform scaling path also scales nested component transforms so spacing remains proportional when native `--scale` fallback is used.
+- `2 copies + 500%` now fails fast with a clear fit error instead of generating overlapping output.
+
+### Regression Tests
+- Added `tests/copies.spec.ts`: `scale increases full assembly XY footprint (not just Z)`.
+- Updated text selectors in `tests/multicolour.spec.ts` and `tests/upload.spec.ts` for new accordion label: `Colours, Filaments and multimaterial settings`.
+
+## Test Cleanup Safety Guard (2026-02-21)
+
+### Symptom
+- Full Playwright runs could remove uploads from the UI/db on shared test instances.
+
+### Fix
+- `tests/global-setup.ts` and `tests/global-teardown.ts` now make upload cleanup opt-in.
+- Cleanup only runs when `TEST_CLEANUP_UPLOADS=1`.
+- Default behavior now preserves uploads/jobs after tests.
+
+### One-time Disk Cleanup
+- Ran orphan cleanup on this instance:
+  - kept files referenced by DB
+  - deleted unreferenced files under `/data/uploads`, `/data/slices`, `/data/logs`
+- Current state on this instance: disk data dirs are clean (`0` files in each).
 
 ## Multicolour Stability
 

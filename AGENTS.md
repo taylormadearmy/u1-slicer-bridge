@@ -16,7 +16,7 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ## Non-goals (v1)
 
-- No MakerWorld scraping (see M26 for optional link import approach)
+- No MakerWorld scraping (M26 adds optional authenticated link import)
 - No per-object filament assignment (single filament per plate)
 - No mesh repair or geometry modifications
 - No multi-material/MMU support
@@ -72,10 +72,17 @@ upload `.3mf` → validate plate → slice with Snapmaker OrcaSlicer → preview
 
 ### Platform Expansion
 ❌ M14 multi-machine support - Support for other printer models beyond U1
-❌ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info/profiles and auto-download 3MF into upload pipeline. Feasibility researched; plan in `memory/milestone-makerworld-integration.md`
+✅ M26 MakerWorld link import - Paste a MakerWorld URL to preview model info and download 3MF. Optional feature (off by default), cookie auth for unlimited downloads, browser-like request headers
 ✅ M30 STL upload support - Accept .stl files via trimesh STL→3MF wrapper. Single-filament only (no multi-plate, no color detection, no embedded print settings). OrcaSlicer slices the wrapped 3MF as normal.
+❌ M31 Android companion app - Lightweight WebView wrapper (~50 lines Kotlin, ~1-2MB APK). Provides standalone app launch (no browser chrome), share target for MakerWorld URLs, configurable server IP. Works over plain HTTP on LAN. Built via GitHub Actions, distributed as APK from Releases.
 
-**Current:** 29.7 / 30 complete (99%)
+### Build Plate & Workflow Enhancements
+✅ M32 Multiple copies - Grid layout engine for duplicating objects on the build plate (1-100 copies, auto spacing, metadata patching for Orca compatibility)
+❌ M33 Move objects on build plate - Interactive drag-to-position objects before slicing
+✅ M34 Vertical layer slider - Side-mounted vertical range input for G-code layer navigation
+✅ M35 Settings backup/restore - Export/import all settings (filaments, presets, defaults) as portable JSON
+
+**Current:** 34 / 38 complete (89%)
 
 ---
 
@@ -144,11 +151,17 @@ Avoid:
 
 After pushing commits, **always ask the user if they want to tag a release** to trigger Docker image builds on GHCR.
 
+**IMPORTANT: Never push directly to prod.** Always release as beta first (`v1.x.x-beta.1`), then promote to stable (`v1.x.x`) after testing.
+
 ```bash
+# Beta release (always do this first)
+git tag v1.x.x-beta.1 && git push origin v1.x.x-beta.1
+
+# Stable/prod release (only after beta has been tested)
 git tag v1.x.x && git push origin v1.x.x
 ```
 
-This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web}` with semver + `latest` tags. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
+This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web}`. Beta tags get `:beta`, stable tags get `:latest`. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
 
 ### Third-Party License Attribution
 
@@ -190,12 +203,12 @@ When adding vendored libraries, CDN dependencies, or new pip/npm packages:
 4. If tests fail, fix and re-run — do not leave failing tests
 
 **After making changes, offer the user a choice:**
-- "I can run the **fast regression** (`npm run test:fast`, ~5 min, 84 tests incl. 1 slice sanity), **targeted tests** (`npm run test:<suite>`), or the **full suite** (`npm test`, ~60 min). Which do you prefer?"
+- "I can run the **fast regression** (`npm run test:fast`, ~5 min, 110 tests incl. 1 slice sanity), **targeted tests** (`npm run test:<suite>`), or the **full suite** (`npm test`, ~60 min, 148 tests). Which do you prefer?"
 - For very targeted changes (1-2 files, clear scope), default to running targeted tests or `test:fast`.
 - For broad changes (multiple files, API + frontend, refactors), recommend `test:fast` or full suite.
 
 ```bash
-# Fast regression (84 tests incl. calicube slice sanity, ~5 min)
+# Fast regression (110 tests incl. calicube slice sanity, ~5 min)
 npm run test:fast
 
 # Quick smoke tests (always run, ~15 seconds, no slicer needed)
@@ -219,6 +232,8 @@ npm test
 | Error handling/edge cases | `npm run test:errors` |
 | File deletion or management | `npm run test:files` |
 | File-level print settings | `npm run test:file-settings` |
+| Copies/duplicator changes | `npm run test:copies` |
+| Settings backup/restore | `npm run test:backup` |
 | Test file changes only | The affected suite(s) |
 | Any significant or cross-cutting change | `npm test` (full suite) |
 
@@ -652,6 +667,30 @@ Multi-plate files were being treated as a single giant plate, causing:
 - **Fix**: For multicolour requests (`extruder_count > 1`), slice endpoints now override load/unload times to `0` in project settings.
 - **Result**: Plate 2 estimate dropped from ~2h to ~50m with prime tower enabled (and ~25m without prime tower), matching expected behavior much better.
 
+**Fixed: Copies Grid Overlap on Multi-Component Assemblies**
+- **Problem**: Dual-colour cube (two separate 10mm cubes offset in assembly) with 4 copies showed 6 visible cubes instead of 8. Adjacent copies overlapped in the center of the grid.
+- **Root Cause**: `_scan_object_bounds()` in `multi_plate_parser.py` scanned vertex bounds from each component's mesh but **never applied the component transform offsets**. Both components referenced the same mesh, so combined bounds equaled one cube's bounds (10mm), ignoring the +/-7.455mm offsets. Actual assembly footprint is 24.9mm wide.
+- **Fix**: Parse each component's `transform` attribute and apply translation offsets (`vals[9]`, `vals[10]`, `vals[11]`) to vertex bounds before combining.
+- **Result**: Object dimensions correctly reported as 24.9x10.5x10.0mm; grid spacing prevents overlap.
+- **Regression tests added**: `copies.spec.ts` — "multi-component assembly dimensions account for component offsets" (verifies width >20mm) and "copies grid has no overlapping objects" (verifies grid cell spacing exceeds object size).
+
+**Fixed: Auto-enable Prime Tower for Multi-Color Copies**
+- **Problem**: Multi-color files with copies >1 dumped 85% of extrusion as orphan purge/wipe material around objects when prime tower was disabled.
+- **Fix**: `routes_slice.py` auto-enables `enable_prime_tower` when `copies > 1` AND `extruder_count > 1`.
+
+**Implemented: Copies UI Dropdown for Mobile**
+- **Problem**: Copies button row (1, 2, 4, 6, 9 + custom input) overflowed on mobile screens.
+- **Fix**: Replaced with `<select>` dropdown with native OS picker. "Custom..." option reveals number input. Compact and works well on all screen sizes.
+
+**Implemented: Settings Backup/Restore (M35)**
+- Export all settings (filaments, extruder presets, slicing defaults) as portable JSON via `GET /presets/backup`.
+- Import settings from JSON via `POST /presets/restore`. Round-trip compatible.
+- Available in Settings modal as "Backup Settings" and "Restore Settings" buttons.
+
+**Implemented: Vertical Layer Slider (M34)**
+- Side-mounted vertical range input replaces horizontal layer slider in G-code viewer.
+- Touch-optimized with `touch-action: none` to prevent mobile pull-to-refresh conflicts.
+
 ### Performance Note
 Plate parsing takes ~30 seconds for large multi-plate files (3-4MB). A loading indicator is now shown during this time.
 
@@ -773,8 +812,8 @@ All tests use Playwright and live in `tests/`. Config is in `playwright.config.t
 **Prerequisites:** Docker services running, `npm install`, `npx playwright install chromium`.
 
 ```bash
-npm run test:fast              # Fast regression (84 tests, ~5 min, incl. slice sanity)
-npm test                       # Run ALL tests (122 tests, ~60 min)
+npm run test:fast              # Fast regression (110 tests, ~5 min, incl. slice sanity)
+npm test                       # Run ALL tests (148 tests, ~60 min)
 npm run test:smoke             # Quick smoke tests (~15s, no slicer needed)
 npm run test:upload            # Upload workflow
 npm run test:slice             # Slicing end-to-end (slow, needs slicer)
@@ -788,6 +827,8 @@ npm run test:settings          # Settings modal, presets, filament CRUD
 npm run test:files             # File management (delete)
 npm run test:errors            # Error handling and edge cases
 npm run test:file-settings     # File-level print settings detection
+npm run test:copies            # Multiple copies grid layout and overlap prevention
+npm run test:backup            # Settings backup/restore import/export
 npm run test:report            # View HTML test report
 ```
 
@@ -814,6 +855,9 @@ tests/
   file-settings.spec.ts     File-level print settings detection
   settings.spec.ts          Settings modal, printer defaults, filament library, presets
   errors.spec.ts            Error handling, edge cases, delete safety
+  stl-upload.spec.ts        STL upload, wrapping, and slicing
+  copies.spec.ts            Multiple copies grid, overlap prevention, dropdown UI
+  backup-restore.spec.ts    Settings backup/restore export/import
 ```
 
 ### Test Fixtures
@@ -850,8 +894,11 @@ Test 3MF files live in `test-data/`:
 | slice-plate | Slow | Yes | Individual plate slicing |
 | multicolour-slice | Slow | Yes | Multi-colour slicing workflow |
 | viewer | Slow | Yes | Canvas rendering, layer controls, API |
+| stl-upload | Medium | Yes | STL upload, wrapping, slicing |
+| copies | Medium | Yes* | Grid layout, overlap prevention, dropdown UI |
+| backup | Fast | No | Settings export/import round-trip |
 
-*file-management creates and deletes its own test data
+*copies slice test needs slicer; other copies tests are fast API-only
 
 ### Writing New Tests
 
@@ -870,3 +917,17 @@ When implementing a new feature or fixing a bug:
 3. Every bug fix should include a test that would have caught the bug.
 4. After changes, deploy to Docker and run at least the targeted test suite.
 5. Offer the user a choice: `test:fast` (~5 min), targeted tests, or full suite (~60 min).
+
+### Scale and Layout Notes (2026-02-21)
+
+- For Bambu-style multi-component assemblies (for example `calib-cube-10-dual-colour-merged.3mf`), internal spacing is defined in both:
+  - `3D/3dmodel.model` component transforms
+  - `Metadata/model_settings.config` matrix metadata
+- When applying scale, update both sources. Scaling only `model_settings.config` is insufficient and can leave model blocks overlapping in XY.
+- For high `copies + scale` combinations that exceed the bed, fail fast with a clear fit error instead of producing overlapping output.
+
+### Test Data Cleanup Safety (2026-02-21)
+
+- Playwright upload cleanup is now opt-in via `TEST_CLEANUP_UPLOADS=1`.
+- Default test runs preserve uploads/jobs in shared/local instances.
+- Use explicit orphan cleanup for disk hygiene: remove only files not referenced by DB paths (`uploads.file_path`, `uploads.copies_path`, `slicing_jobs.gcode_path`, `slicing_jobs.log_path`).

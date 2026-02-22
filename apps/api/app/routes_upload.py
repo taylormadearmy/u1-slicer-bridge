@@ -14,6 +14,7 @@ from plate_validator import PlateValidator, PlateValidationError
 from config import get_printer_profile
 from multi_plate_parser import parse_multi_plate_3mf
 from stl_converter import convert_stl_to_3mf, STLConversionError
+from upload_processor import process_3mf_file
 
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -60,206 +61,13 @@ async def upload_3mf(file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
-    # --- STL: simplified metadata path (single object, no multi-plate/colors/settings) ---
-    if is_stl:
-        try:
-            objects = parse_3mf(file_path)
-        except Exception:
-            objects = []
-        objects_count = len(objects) if objects else 1
-
-        try:
-            printer_profile = get_printer_profile("snapmaker_u1")
-            validator = PlateValidator(printer_profile)
-            validation = validator.validate_3mf_bounds(file_path)
-        except Exception as e:
-            file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=f"Bounds validation failed: {str(e)}")
-
-        detected_colors = []
-        file_print_settings = {}
-        is_multi_plate = False
-        plates = []
-        plate_validations = []
-        plate_metadata_json = None
-
-    # --- 3MF: full metadata extraction path ---
-    else:
-        # Parse .3mf and extract object/plate metadata (single parse pass)
-        try:
-            plates, is_multi_plate = parse_multi_plate_3mf(file_path)
-            objects = parse_3mf(file_path)
-        except ValueError as e:
-            file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail=f"Failed to parse .3mf: {str(e)}")
-
-        if not objects:
-            file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail="No valid objects found in .3mf file")
-
-        objects_count = len(objects)
-
-        # Validate plate bounds (pass pre-parsed plates to avoid re-parsing)
-        try:
-            printer_profile = get_printer_profile("snapmaker_u1")
-            validator = PlateValidator(printer_profile)
-            validation = validator.validate_3mf_bounds(file_path, plates=plates)
-
-            # For multi-plate files, suppress combined-scene warnings when at least
-            # one individual plate fits the build volume.
-            plate_validations = []
-            if validation.get('is_multi_plate'):
-                for plate in validation.get('plates', []):
-                    try:
-                        plate_id = plate['plate_id']
-                        plate_validation = validator.validate_3mf_bounds(file_path, plate_id, plates=plates)
-                        plate_validations.append({
-                            "plate_id": plate['plate_id'],
-                            "bounds": plate_validation['bounds'],
-                            "warnings": plate_validation['warnings'],
-                            "fits": plate_validation['fits']
-                        })
-                    except Exception as e:
-                        logger.error(f"Failed to validate plate {plate.get('plate_id')}: {str(e)}")
-                        plate_validations.append({
-                            "plate_id": plate.get('plate_id'),
-                            "error": str(e),
-                            "fits": False
-                        })
-
-                any_plate_fits = any(p.get('fits', False) for p in plate_validations)
-                if any_plate_fits:
-                    validation['warnings'] = [
-                        w for w in validation.get('warnings', [])
-                        if "exceeds build volume" not in w.lower()
-                        and "multi-plate file with" not in w.lower()
-                    ]
-                    validation['fits'] = True
-            else:
-                plate_validations = []
-        except PlateValidationError as e:
-            file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=f"Plate validation failed: {str(e)}")
-        except Exception as e:
-            file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail=f"Failed to validate plate: {str(e)}")
-
-        # Detect colors and print settings before storing (so we can cache them)
-        detected_colors = []
-        try:
-            detected_colors = detect_colors_from_3mf(file_path)
-        except Exception as e:
-            logger.warning(f"Failed to detect colors: {e}")
-
-        file_print_settings = {}
-        try:
-            file_print_settings = detect_print_settings(file_path)
-        except Exception as e:
-            logger.warning(f"Failed to detect print settings: {e}")
-
-        # Build plate_metadata cache for multi-plate files (avoids re-parsing on every GET /plates)
-        is_multi_plate = validation.get('is_multi_plate', False)
-        plate_metadata_json = None
-        if is_multi_plate and plates:
-            from routes_slice import _index_preview_assets
-            try:
-                preview_assets = _index_preview_assets(file_path)
-                preview_map = preview_assets.get("by_plate", {})
-                has_generic_preview = isinstance(preview_assets.get("best"), str)
-
-                colors_per_plate = {}
-                try:
-                    colors_per_plate = detect_colors_per_plate(file_path)
-                except Exception:
-                    pass
-
-                plate_info_cache = []
-                for plate in plates:
-                    plate_dict = plate.to_dict() if hasattr(plate, 'to_dict') else (plate if isinstance(plate, dict) else {})
-                    pid = plate_dict.get('plate_id') or (plate.plate_id if hasattr(plate, 'plate_id') else None)
-
-                    # Per-plate colors if available; else use all global colors
-                    plate_colors = colors_per_plate.get(pid, detected_colors or [])
-                    pv = next((p for p in plate_validations if p.get('plate_id') == pid), {})
-
-                    plate_dict.update({
-                        "detected_colors": plate_colors,
-                        "has_preview": pid in preview_map if isinstance(preview_map, dict) else False,
-                        "has_generic_preview": has_generic_preview,
-                        "validation": {
-                            "fits": pv.get('fits', False),
-                            "warnings": pv.get('warnings', []),
-                            "bounds": pv.get('bounds')
-                        }
-                    })
-                    plate_info_cache.append(plate_dict)
-
-                plate_metadata_json = json.dumps(plate_info_cache)
-            except Exception as e:
-                logger.warning(f"Failed to build plate metadata cache: {e}")
-
-    # Store in database with bounds information and cached metadata
-    pool = get_pg_pool()
-    async with pool.acquire() as conn:
-        bounds = validation['bounds']
-        warnings_text = '\n'.join(validation['warnings']) if validation['warnings'] else None
-
-        upload_id = await conn.fetchval(
-            """
-            INSERT INTO uploads (
-                filename, file_path, file_size,
-                plate_validated, bounds_min_x, bounds_min_y, bounds_min_z,
-                bounds_max_x, bounds_max_y, bounds_max_z, bounds_warning,
-                is_multi_plate, plate_count, detected_colors,
-                file_print_settings, plate_metadata
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-            RETURNING id
-            """,
-            file.filename,
-            str(file_path),
-            len(content),
-            True,  # plate_validated
-            bounds['min'][0], bounds['min'][1], bounds['min'][2],
-            bounds['max'][0], bounds['max'][1], bounds['max'][2],
-            warnings_text,
-            is_multi_plate,
-            len(plates) if is_multi_plate else 0,
-            json.dumps(detected_colors) if detected_colors else None,
-            json.dumps(file_print_settings) if file_print_settings else None,
-            plate_metadata_json
-        )
-
-    response = {
-        "upload_id": upload_id,
-        "filename": file.filename,
-        "file_size": len(content),
-        "objects_count": objects_count,
-        "bounds": validation['bounds'],
-        "warnings": validation['warnings'],
-        "fits": validation['fits']
-    }
-
-    if detected_colors:
-        response["detected_colors"] = detected_colors
-        response["has_multicolor"] = len(detected_colors) > 1
-
-    if file_print_settings:
-        response["file_print_settings"] = file_print_settings
-
-    # Add multi-plate information if applicable
-    if is_multi_plate:
-        response.update({
-            "is_multi_plate": True,
-            "plates": validation['plates'],
-            "plate_count": len(validation['plates'])
-        })
-        response["plate_validations"] = plate_validations
-
-    return response
+    # Both STL (converted to 3MF) and native 3MF use the shared processor
+    try:
+        return await process_3mf_file(file_path, file.filename, len(content))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{upload_id}")
@@ -463,3 +271,108 @@ async def delete_upload(upload_id: int):
         await conn.execute("DELETE FROM uploads WHERE id = $1", upload_id)
     
     return {"message": "Upload deleted successfully"}
+
+
+# -----------------------------------------------------------------------
+# Multiple Copies (M32)
+# -----------------------------------------------------------------------
+
+@router.post("/{upload_id}/copies")
+async def apply_copies(upload_id: int, body: dict):
+    """Add multiple copies of the object arranged in a grid on the build plate.
+
+    Body: { "copies": 4, "spacing": 5.0 }
+    """
+    from copy_duplicator import apply_copies_to_3mf, get_object_dimensions, estimate_max_copies
+
+    copies = body.get("copies", 1)
+    spacing = body.get("spacing", 5.0)
+
+    if copies < 1 or copies > 100:
+        raise HTTPException(400, "copies must be between 1 and 100")
+    if spacing < 0 or spacing > 50:
+        raise HTTPException(400, "spacing must be between 0 and 50 mm")
+
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            "SELECT file_path, filename FROM uploads WHERE id = $1", upload_id
+        )
+        if not upload:
+            raise HTTPException(404, "Upload not found")
+
+        source_path = Path(upload["file_path"])
+        if not source_path.exists():
+            raise HTTPException(404, "Upload file not found on disk")
+
+        # Output goes alongside the original with a suffix
+        copies_path = source_path.with_suffix(".copies.3mf")
+
+        try:
+            result = apply_copies_to_3mf(source_path, copies_path, copies, spacing)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        # Store the copies path and spacing in the upload metadata
+        await conn.execute(
+            "UPDATE uploads SET copies_path = $1, copies_count = $2, copies_spacing = $3 WHERE id = $4",
+            str(copies_path), copies, spacing, upload_id,
+        )
+
+    return result
+
+
+@router.delete("/{upload_id}/copies")
+async def reset_copies(upload_id: int):
+    """Remove copies and revert to the original single object."""
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            "SELECT copies_path FROM uploads WHERE id = $1", upload_id
+        )
+        if not upload:
+            raise HTTPException(404, "Upload not found")
+
+        # Delete copies file if it exists
+        if upload["copies_path"]:
+            copies_path = Path(upload["copies_path"])
+            if copies_path.exists():
+                copies_path.unlink()
+
+        await conn.execute(
+            "UPDATE uploads SET copies_path = NULL, copies_count = 1 WHERE id = $1",
+            upload_id,
+        )
+
+    return {"message": "Copies removed", "copies": 1}
+
+
+@router.get("/{upload_id}/copies/info")
+async def get_copies_info(upload_id: int):
+    """Get object dimensions and max copy estimate for this upload."""
+    from copy_duplicator import get_object_dimensions, estimate_max_copies
+
+    pool = get_pg_pool()
+    async with pool.acquire() as conn:
+        upload = await conn.fetchrow(
+            "SELECT file_path, copies_count FROM uploads WHERE id = $1", upload_id
+        )
+        if not upload:
+            raise HTTPException(404, "Upload not found")
+
+        source_path = Path(upload["file_path"])
+        if not source_path.exists():
+            raise HTTPException(404, "Upload file not found on disk")
+
+    try:
+        obj_w, obj_d, obj_h = get_object_dimensions(source_path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    max_copies = estimate_max_copies(obj_w, obj_d)
+
+    return {
+        "object_dimensions": [round(obj_w, 1), round(obj_d, 1), round(obj_h, 1)],
+        "max_copies": max_copies,
+        "current_copies": upload["copies_count"] or 1,
+    }

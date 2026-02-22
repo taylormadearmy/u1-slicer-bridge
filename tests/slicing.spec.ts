@@ -87,6 +87,36 @@ test.describe('Slicing Workflow', () => {
     await expect(modal.getByText(/layers/).first()).toBeVisible();
   });
 
+  test('back to configure preserves multicolour state', async ({ page }) => {
+    await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
+
+    const beforeColors = await getAppState(page, 'detectedColors');
+    const beforeFilaments = await getAppState(page, 'selectedFilaments');
+    expect(beforeColors.length).toBeGreaterThan(1);
+    expect(beforeFilaments.length).toBeGreaterThan(1);
+
+    await page.getByRole('button', { name: /Slice Now/i }).click();
+    await waitForSliceComplete(page);
+
+    await page.getByTitle('Back to configure').click();
+    await page.waitForFunction(() => {
+      const body = document.querySelector('body');
+      const stack = body?._x_dataStack || [];
+      for (const scope of stack) {
+        if ('currentStep' in scope) return scope.currentStep === 'configure';
+      }
+      return false;
+    }, undefined, { timeout: 10_000 });
+
+    const afterColors = await getAppState(page, 'detectedColors');
+    const afterFilaments = await getAppState(page, 'selectedFilaments');
+    const selectedUpload = await getAppState(page, 'selectedUpload');
+
+    expect(afterColors.length).toBeGreaterThan(1);
+    expect(afterFilaments.length).toBeGreaterThan(1);
+    expect((selectedUpload?.file_size || 0)).toBeGreaterThan(0);
+  });
+
   test('G-code preview shows detected colors (not all white)', async ({ page }) => {
     await uploadFile(page, 'calib-cube-10-dual-colour-merged.3mf');
     await page.getByRole('button', { name: /Slice Now/i }).click();

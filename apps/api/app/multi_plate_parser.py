@@ -376,29 +376,51 @@ def _scan_object_bounds(zf: zipfile.ZipFile, obj_elem, ns: Dict[str, str]) -> Op
     for component in components.findall("m:component", ns):
         ref_path = component.get(f"{{{p_ns}}}path")
         ref_object_id = component.get("objectid")
-        if not ref_path or not ref_object_id:
+        if not ref_object_id:
             continue
 
-        try:
-            ref_xml = zf.read(ref_path.lstrip("/"))
-            ref_root = ET.fromstring(ref_xml)
-            ref_resources = ref_root.find("m:resources", ns)
-            if ref_resources is None:
+        # Parse component transform (offset applied to this component's geometry)
+        comp_transform = component.get("transform", "")
+        tx, ty, tz = 0.0, 0.0, 0.0
+        if comp_transform:
+            vals = comp_transform.split()
+            if len(vals) >= 12:
+                tx, ty, tz = float(vals[9]), float(vals[10]), float(vals[11])
+
+        ref_mesh_elem = None
+        if ref_path:
+            # External sub-model file
+            try:
+                ref_xml = zf.read(ref_path.lstrip("/"))
+                ref_root = ET.fromstring(ref_xml)
+                ref_resources = ref_root.find("m:resources", ns)
+                if ref_resources is None:
+                    continue
+                for ref_obj in ref_resources.findall("m:object", ns):
+                    if ref_obj.get("id") == ref_object_id:
+                        ref_mesh_elem = ref_obj.find("m:mesh", ns)
+                        break
+            except (KeyError, ET.ParseError):
                 continue
-            for ref_obj in ref_resources.findall("m:object", ns):
-                if ref_obj.get("id") == ref_object_id:
-                    ref_mesh = ref_obj.find("m:mesh", ns)
-                    if ref_mesh is not None:
-                        result = _scan_vertex_bounds_from_element(ref_mesh, ns)
-                        if result:
-                            bmin, bmax = result
-                            for i in range(3):
-                                if bmin[i] < combined_min[i]: combined_min[i] = bmin[i]
-                                if bmax[i] > combined_max[i]: combined_max[i] = bmax[i]
-                            found = True
-                    break
-        except (KeyError, ET.ParseError):
-            continue
+        else:
+            # Local component reference (same model file)
+            parent = obj_elem.getparent() if hasattr(obj_elem, 'getparent') else None
+            # Walk siblings in resources to find the referenced object
+            if parent is not None:
+                for sibling in parent.findall("m:object", ns):
+                    if sibling.get("id") == ref_object_id:
+                        ref_mesh_elem = sibling.find("m:mesh", ns)
+                        break
+
+        if ref_mesh_elem is not None:
+            result = _scan_vertex_bounds_from_element(ref_mesh_elem, ns)
+            if result:
+                bmin, bmax = result
+                # Apply component transform offset to bounds
+                for i, offset in enumerate([tx, ty, tz]):
+                    if bmin[i] + offset < combined_min[i]: combined_min[i] = bmin[i] + offset
+                    if bmax[i] + offset > combined_max[i]: combined_max[i] = bmax[i] + offset
+                found = True
 
     return (combined_min, combined_max) if found else None
 

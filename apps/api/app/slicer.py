@@ -168,6 +168,7 @@ class OrcaSlicer:
         workspace: Path,
         output_name: str = "output.gcode",
         plate_index: Optional[int] = None,
+        scale_factor: Optional[float] = None,
     ) -> Dict:
         """Execute Orca Slicer CLI with pre-built 3MF file.
 
@@ -196,8 +197,10 @@ class OrcaSlicer:
             "--slice", slice_arg,
             "--allow-newer-file",  # Allow Bambu Studio 3MF files with newer versions
             "--outputdir", str(workspace),
-            str(three_mf_path)
         ]
+        if scale_factor is not None and abs(float(scale_factor) - 1.0) > 1e-6:
+            cmd.extend(["--scale", str(float(scale_factor))])
+        cmd.append(str(three_mf_path))
 
         # Execute with timeout
         try:
@@ -226,11 +229,12 @@ class OrcaSlicer:
         workspace: Path,
         output_name: str = "output.gcode",
         plate_index: Optional[int] = None,
+        scale_factor: Optional[float] = None,
     ) -> Dict:
         """Async version of slice_3mf — acquires semaphore to limit concurrent processes."""
         async with _get_slicer_semaphore():
             return await asyncio.to_thread(
-                self.slice_3mf, three_mf_path, workspace, output_name, plate_index
+                self.slice_3mf, three_mf_path, workspace, output_name, plate_index, scale_factor
             )
 
     def parse_gcode_metadata(self, gcode_path: Path) -> Dict:

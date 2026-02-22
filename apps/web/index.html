@@ -4,11 +4,22 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>U1 Slicer Bridge</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233b82f6'/%3E%3Cstop offset='1' stop-color='%231d4ed8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='6' fill='url(%23g)'/%3E%3Cpath d='M8 22h16M9 18h14M10 14h12M12 10h8' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+    <meta name="theme-color" content="#4F46E5">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/icon.svg">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+    <link rel="apple-touch-icon" href="/icon-192.png">
     <!-- Vendored 3D libraries (LAN-first, no CDN) — Three.js r159 + gcode-preview v2.18.0 -->
     <script src="lib/three.min.js"></script>
     <script src="lib/gcode-preview.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+    </script>
     <script src="https://cdn.tailwindcss.com/3.4.0"></script>
     <style>
         [x-cloak] { display: none !important; }
@@ -18,6 +29,39 @@
         .thumb-zoom:hover { overflow: visible; z-index: 50; }
         .thumb-zoom:hover img { transform: scale(3); box-shadow: 0 4px 15px rgba(0,0,0,0.3); border-radius: 4px; position: relative; z-index: 50; }
         .thumb-zoom img { transition: transform 0.15s ease; }
+        /* Vertical layer slider */
+        .vertical-slider {
+            writing-mode: vertical-lr;
+            direction: rtl;
+            appearance: none;
+            -webkit-appearance: none;
+            width: 6px;
+            background: #d1d5db;
+            border-radius: 3px;
+            cursor: pointer;
+            outline: none;
+            touch-action: none; /* Prevent pull-to-refresh on mobile */
+        }
+        .vertical-slider::-webkit-slider-thumb {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            background: #3b82f6;
+            border-radius: 50%;
+            cursor: grab;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        .vertical-slider::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            background: #3b82f6;
+            border-radius: 50%;
+            cursor: grab;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen" x-data="app()">
@@ -133,6 +177,94 @@
                         </div>
                         <p class="text-xs text-gray-500 mt-2" x-show="uploadPhase === 'processing'">Large or multi-plate files can take around 30s to become ready.</p>
                     </div>
+                </section>
+
+                <!-- MakerWorld Import (only shown when enabled in Settings) -->
+                <section x-show="makerWorldEnabled" x-cloak class="bg-white rounded-lg shadow-sm p-4 md:p-6 mb-6">
+                    <h2 class="text-lg md:text-xl font-semibold mb-4">Import from MakerWorld</h2>
+                    <p class="text-sm text-gray-500 mb-4">Paste a MakerWorld link to import a model directly.</p>
+
+                    <!-- URL Input -->
+                    <div class="flex gap-2">
+                        <input
+                            type="url"
+                            x-model="makerWorldUrl"
+                            @keydown.enter="lookupMakerWorld()"
+                            placeholder="https://makerworld.com/models/..."
+                            class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                            :disabled="makerWorldLoading || makerWorldDownloading">
+                        <button
+                            @click="lookupMakerWorld()"
+                            :disabled="!makerWorldUrl.trim() || makerWorldLoading || makerWorldDownloading"
+                            class="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition whitespace-nowrap">
+                            <span x-show="!makerWorldLoading">Look Up</span>
+                            <span x-show="makerWorldLoading" class="flex items-center gap-1">
+                                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path></svg>
+                                Looking up...
+                            </span>
+                        </button>
+                    </div>
+
+                    <!-- Model Preview Card -->
+                    <template x-if="makerWorldModel">
+                        <div class="mt-4 border border-indigo-200 rounded-lg bg-indigo-50 p-4">
+                            <div class="flex gap-4">
+                                <!-- Thumbnail -->
+                                <template x-if="makerWorldModel.thumbnail">
+                                    <img :src="makerWorldModel.thumbnail" class="w-24 h-24 rounded-lg object-cover flex-shrink-0 bg-gray-200" alt="Model preview">
+                                </template>
+                                <template x-if="!makerWorldModel.thumbnail">
+                                    <div class="w-24 h-24 rounded-lg bg-gray-200 flex-shrink-0 flex items-center justify-center">
+                                        <svg class="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                                    </div>
+                                </template>
+
+                                <!-- Info -->
+                                <div class="flex-1 min-w-0">
+                                    <h3 class="font-semibold text-gray-900 truncate" x-text="makerWorldModel.title"></h3>
+                                    <p class="text-sm text-gray-500 mt-0.5" x-text="'by ' + makerWorldModel.author"></p>
+
+                                    <!-- Profile selector -->
+                                    <template x-if="makerWorldModel.profiles && makerWorldModel.profiles.length > 1">
+                                        <div class="mt-2">
+                                            <label class="text-xs font-medium text-gray-600">Print Profile</label>
+                                            <select x-model.number="makerWorldSelectedProfile"
+                                                    class="mt-0.5 w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white">
+                                                <template x-for="profile in makerWorldModel.profiles" :key="profile.instance_id">
+                                                    <option :value="profile.instance_id" x-text="profile.title"></option>
+                                                </template>
+                                            </select>
+                                        </div>
+                                    </template>
+                                    <template x-if="makerWorldModel.profiles && makerWorldModel.profiles.length === 1">
+                                        <p class="text-xs text-gray-500 mt-2" x-text="makerWorldModel.profiles[0].title"></p>
+                                    </template>
+                                    <template x-if="!makerWorldModel.profiles || makerWorldModel.profiles.length === 0">
+                                        <p class="text-xs text-yellow-700 mt-2">No downloadable profiles found for this model.</p>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <!-- Action buttons -->
+                            <div class="mt-3 flex gap-2">
+                                <button
+                                    @click="downloadMakerWorld()"
+                                    :disabled="!makerWorldSelectedProfile || makerWorldDownloading"
+                                    class="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+                                    <span x-show="!makerWorldDownloading">Download & Import</span>
+                                    <span x-show="makerWorldDownloading" class="flex items-center justify-center gap-1">
+                                        <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path></svg>
+                                        Downloading...
+                                    </span>
+                                </button>
+                                <button @click="clearMakerWorld()"
+                                        class="px-3 py-2 text-gray-600 bg-white border border-gray-300 rounded-lg text-sm hover:bg-gray-50 transition"
+                                        :disabled="makerWorldDownloading">
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </template>
                 </section>
             </div>
 
@@ -256,6 +388,49 @@
                             </template>
                         </div>
                     </div>
+
+                    <!-- Copies control (single-plate, non-multi-plate files only) -->
+                    <template x-if="!selectedUpload?.is_multi_plate">
+                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
+                            <div class="flex items-center gap-3 flex-wrap">
+                                <span class="text-sm font-medium text-gray-700">Copies:</span>
+                                <select x-model="copySelectValue"
+                                        @change="if (copySelectValue !== 'custom') applyCopies(parseInt(copySelectValue))"
+                                        :disabled="copiesApplying"
+                                        class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50">
+                                    <option value="1">1</option>
+                                    <option value="2">2</option>
+                                    <option value="4">4</option>
+                                    <option value="6">6</option>
+                                    <option value="9">9</option>
+                                    <option value="custom">Custom...</option>
+                                </select>
+                                <template x-if="copySelectValue === 'custom'">
+                                    <div class="flex items-center gap-1">
+                                        <input type="number" min="1" max="100"
+                                               x-model.number="copyCountInput"
+                                               @keydown.enter="applyCopies(copyCountInput)"
+                                               class="w-16 px-2 py-1.5 text-sm border border-gray-300 rounded-lg"
+                                               placeholder="#">
+                                        <button @click="applyCopies(copyCountInput)"
+                                                :disabled="copiesApplying || !copyCountInput || copyCountInput < 1"
+                                                class="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded-lg disabled:opacity-50 transition font-medium">
+                                            Go
+                                        </button>
+                                    </div>
+                                </template>
+                                <span x-show="copiesApplying" class="text-xs text-blue-600 flex items-center gap-1">
+                                    <svg class="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                                    </svg>
+                                    Arranging...
+                                </span>
+                                <span x-show="copyGridInfo && !copiesApplying" class="text-xs text-gray-500"
+                                      x-text="copyGridInfo ? `${copyGridInfo.cols}×${copyGridInfo.rows} grid` + (copyGridInfo.max_copies ? ` (max ~${copyGridInfo.max_copies})` : '') : ''"></span>
+                            </div>
+                        </div>
+                    </template>
 
                     <!-- ▼ Accordion: Colours & Filaments -->
                     <div class="mb-4 border border-gray-200 rounded-lg overflow-hidden">
@@ -792,100 +967,104 @@
             <h3 class="text-lg font-semibold mb-4">G-code Preview</h3>
 
             <template x-if="sliceResult && sliceResult.job_id">
-                <div x-data="gcodeViewer(sliceResult.job_id, sliceResult.filament_colors)" class="space-y-4">
-                <!-- Canvas Container -->
-                <div class="relative bg-gray-900 rounded-lg overflow-hidden" style="height: 400px;">
-                    <canvas x-ref="canvas" class="w-full h-full"></canvas>
+                <div x-data="gcodeViewer(sliceResult.job_id, sliceResult.filament_colors)" class="space-y-3">
+                <!-- Viewer + vertical layer slider -->
+                <div class="flex gap-0" style="height: 400px;">
+                    <!-- Canvas Container -->
+                    <div class="relative bg-gray-900 rounded-l-lg overflow-hidden flex-1">
+                        <canvas x-ref="canvas" class="w-full h-full"></canvas>
 
-                    <!-- Zoom controls overlay -->
-                    <div class="absolute top-2 right-2 flex flex-col gap-1 z-10">
-                        <button @click="zoomIn()" title="Zoom in"
-                                class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">+</button>
-                        <button @click="zoomOut()" title="Zoom out"
-                                class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">&minus;</button>
-                        <button @click="resetView()" title="Fit to bed"
-                                class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center">
-                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
-                            </svg>
-                        </button>
-                    </div>
+                        <!-- Zoom controls overlay -->
+                        <div class="absolute top-2 right-2 flex flex-col gap-1 z-10">
+                            <button @click="zoomIn()" title="Zoom in"
+                                    class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">+</button>
+                            <button @click="zoomOut()" title="Zoom out"
+                                    class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center text-lg font-bold leading-none">&minus;</button>
+                            <button @click="resetView()" title="Fit to bed"
+                                    class="w-8 h-8 bg-black/60 hover:bg-black/80 text-white rounded flex items-center justify-center">
+                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                    <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+                                </svg>
+                            </button>
+                        </div>
 
-                    <!-- Loading overlay -->
-                    <div x-show="loading" class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-                        <div class="text-white text-sm flex items-center gap-2">
-                            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
-                            </svg>
-                            <span x-text="loadingMessage"></span>
+                        <!-- Loading overlay -->
+                        <div x-show="loading" class="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
+                            <div class="text-white text-sm flex items-center gap-2">
+                                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                                </svg>
+                                <span x-text="loadingMessage"></span>
+                            </div>
+                        </div>
+
+                        <!-- Error message -->
+                        <div x-show="error" class="absolute inset-0 bg-red-900 bg-opacity-75 flex items-center justify-center p-4">
+                            <div class="text-white text-sm text-center" x-text="error"></div>
                         </div>
                     </div>
 
-                    <!-- Error message -->
-                    <div x-show="error" class="absolute inset-0 bg-red-900 bg-opacity-75 flex items-center justify-center p-4">
-                        <div class="text-white text-sm text-center" x-text="error"></div>
-                    </div>
-                </div>
-
-                <!-- Layer Controls -->
-                <div class="space-y-3">
-                    <!-- Layer slider -->
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm">
-                            <span class="text-gray-600">Layer</span>
-                            <span class="font-medium" x-text="displayLayerText()"></span>
-                        </div>
+                    <!-- Vertical layer slider rail -->
+                    <div class="flex flex-col items-center bg-gray-100 rounded-r-lg px-1 py-2 w-10 select-none"
+                         style="touch-action: none; overscroll-behavior: contain;"
+                         x-show="totalLayers > 0" x-cloak>
+                        <span class="text-[10px] text-gray-500 mb-1" x-text="totalLayers - 1"></span>
                         <input type="range"
                                x-model.number="currentLayer"
                                @input="onLayerChange(currentLayer)"
                                min="0"
                                :max="totalLayers - 1"
-                               class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider">
+                               class="vertical-slider flex-1"
+                               title="Layer slider">
+                        <span class="text-[10px] text-gray-500 mt-1">0</span>
                     </div>
+                </div>
 
-                    <!-- Navigation buttons -->
-                    <div class="flex gap-2">
+                <!-- Layer info bar + controls -->
+                <div class="flex flex-wrap items-center gap-3 text-sm">
+                    <span class="text-gray-600">Layer <span class="font-medium" x-text="displayLayerText()"></span></span>
+                    <div class="flex gap-1">
                         <button @click="previousLayer()"
                                 :disabled="currentLayer === 0"
-                                class="flex-1 px-4 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded-lg transition text-sm font-medium">
-                            ← Previous
+                                aria-label="Previous"
+                                title="Previous layer"
+                                class="px-3 py-1 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded transition text-sm font-medium">
+                            ←
                         </button>
                         <button @click="nextLayer()"
                                 :disabled="currentLayer === totalLayers - 1"
-                                class="flex-1 px-4 py-2 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded-lg transition text-sm font-medium">
-                            Next →
+                                aria-label="Next"
+                                title="Next layer"
+                                class="px-3 py-1 bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 rounded transition text-sm font-medium">
+                            →
                         </button>
                     </div>
-
-                    <!-- View options -->
-                    <div class="flex items-center gap-4 text-sm">
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input type="checkbox"
-                                   x-model="showTravel"
-                                   @change="toggleTravel()"
-                                   class="rounded">
-                            <span class="text-gray-700">Show travel moves</span>
-                        </label>
-                    </div>
-
-                    <!-- Color Legend (shown when multiple colors) -->
-                    <template x-if="filamentColors && filamentColors.length > 1">
-                        <div class="mt-3 p-3 bg-gray-100 rounded-lg">
-                            <div class="text-xs text-gray-600 mb-2">Extruder Colors:</div>
-                            <div class="flex flex-wrap gap-2">
-                                <template x-for="(color, idx) in filamentColors" :key="idx">
-                                    <div class="flex items-center gap-1 px-2 py-1 bg-white rounded border">
-                                        <div class="w-3 h-3 rounded-full border" 
-                                             :style="`background-color: ${color}`"></div>
-                                        <span class="text-xs text-gray-700" x-text="`E${idx + 1}`"></span>
-                                        <span class="text-xs text-gray-500" x-text="color"></span>
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                    </template>
+                    <label class="flex items-center gap-2 cursor-pointer ml-auto">
+                        <input type="checkbox"
+                               x-model="showTravel"
+                               @change="toggleTravel()"
+                               class="rounded">
+                        <span class="text-gray-700">Travel</span>
+                    </label>
                 </div>
+
+                <!-- Color Legend (shown when multiple colors) -->
+                <template x-if="filamentColors && filamentColors.length > 1">
+                    <div class="p-3 bg-gray-100 rounded-lg">
+                        <div class="text-xs text-gray-600 mb-2">Extruder Colors:</div>
+                        <div class="flex flex-wrap gap-2">
+                            <template x-for="(color, idx) in filamentColors" :key="idx">
+                                <div class="flex items-center gap-1 px-2 py-1 bg-white rounded border">
+                                    <div class="w-3 h-3 rounded-full border"
+                                         :style="`background-color: ${color}`"></div>
+                                    <span class="text-xs text-gray-700" x-text="`E${idx + 1}`"></span>
+                                    <span class="text-xs text-gray-500" x-text="color"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
 
                 <!-- Mobile hint -->
                 <p class="text-xs text-gray-500 text-center md:hidden">
@@ -970,6 +1149,65 @@
             <p x-show="!printerSettings.moonraker_url" x-cloak class="text-xs text-gray-400 mt-2">
                 Not configured. Set a Moonraker URL to enable "Send to Printer".
             </p>
+        </section>
+
+        <!-- Settings: MakerWorld Integration -->
+        <section class="bg-white p-4 md:p-6 mb-0 border-b border-gray-100">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg md:text-xl font-semibold">MakerWorld Integration</h2>
+                <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" x-model="makerWorldEnabled" class="sr-only peer">
+                    <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                    <span class="ms-2 text-sm text-gray-600" x-text="makerWorldEnabled ? 'Enabled' : 'Disabled'"></span>
+                </label>
+            </div>
+            <p x-show="!makerWorldEnabled" x-cloak class="text-xs text-gray-400">
+                Enable to import models directly from MakerWorld links.
+            </p>
+            <template x-if="makerWorldEnabled">
+            <div>
+            <p class="text-xs text-gray-500 mb-3">
+                Add your MakerWorld session cookies to enable unlimited downloads.
+                Without cookies, downloads are limited to ~5 per IP.
+            </p>
+            <div class="mb-3">
+                <div class="flex items-center gap-2 mb-2">
+                    <label class="block text-xs text-gray-500">Session Cookies</label>
+                    <span x-show="hasMakerWorldCookies" x-cloak
+                          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                        Configured
+                    </span>
+                    <button x-show="hasMakerWorldCookies" x-cloak
+                            @click="clearMakerWorldCookies()"
+                            class="text-xs text-red-500 hover:text-red-700 hover:underline">
+                        Clear
+                    </button>
+                    <span x-show="!hasMakerWorldCookies" x-cloak
+                          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">
+                        Not configured
+                    </span>
+                </div>
+                <textarea x-model="printerSettings.makerworld_cookies"
+                          :placeholder="hasMakerWorldCookies ? 'Cookies saved. Paste new cookies here to update.' : 'Paste your Cookie header value here...'"
+                          rows="3"
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono text-xs resize-none"></textarea>
+            </div>
+            <details class="text-xs text-gray-400">
+                <summary class="cursor-pointer hover:text-gray-600">How to get your cookies</summary>
+                <ol class="mt-2 ml-4 list-decimal space-y-1 text-gray-500">
+                    <li>Log in to <a href="https://makerworld.com" target="_blank" class="text-indigo-600 hover:underline">makerworld.com</a> in your browser</li>
+                    <li>Press <strong>F12</strong> to open Developer Tools</li>
+                    <li>Go to the <strong>Network</strong> tab and check <strong>Preserve log</strong></li>
+                    <li>Navigate to any model page on MakerWorld</li>
+                    <li>Click the <strong>Doc</strong> filter button to show page requests only</li>
+                    <li>Click the first <strong>makerworld.com</strong> request in the list</li>
+                    <li>Scroll down in <strong>Request Headers</strong> and find the <strong>Cookie</strong> header</li>
+                    <li>Right-click the Cookie value &rarr; <strong>Copy value</strong> and paste it above</li>
+                </ol>
+                <p class="mt-2 text-gray-400">Cookies are stored securely on your server and never sent to the browser. They will expire periodically and need to be refreshed.</p>
+            </details>
+            </div>
+            </template>
         </section>
 
         <!-- Settings: Printer Defaults -->
@@ -1460,6 +1698,50 @@
                 </template>
             </div>
         </section>
+        <!-- Settings: Backup & Restore -->
+        <section class="bg-white shadow-sm p-4 md:p-6">
+            <h2 class="text-lg md:text-xl font-semibold mb-4">Backup & Restore</h2>
+            <p class="text-sm text-gray-600 mb-4">Export all settings (filaments, extruder presets, slicing defaults, printer URL) as a JSON file, or restore from a previous backup.</p>
+
+            <div class="flex flex-wrap gap-3 items-start">
+                <!-- Export -->
+                <button @click="exportSettings()"
+                        :disabled="settingsExporting"
+                        class="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition flex items-center gap-2">
+                    <svg x-show="settingsExporting" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                    </svg>
+                    <span x-text="settingsExporting ? 'Exporting...' : 'Export Settings'"></span>
+                </button>
+
+                <!-- Import -->
+                <div class="flex items-center gap-2">
+                    <label class="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 cursor-pointer transition">
+                        Choose Backup File
+                        <input type="file" accept=".json" class="hidden"
+                               @change="settingsImportFile = $event.target.files[0]">
+                    </label>
+                    <span x-show="settingsImportFile" class="text-sm text-gray-600 truncate max-w-[200px]" x-text="settingsImportFile?.name"></span>
+                </div>
+                <button x-show="settingsImportFile"
+                        @click="importSettings()"
+                        :disabled="settingsImporting"
+                        class="px-4 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 disabled:bg-gray-400 transition flex items-center gap-2">
+                    <svg x-show="settingsImporting" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+                    </svg>
+                    <span x-text="settingsImporting ? 'Importing...' : 'Import Settings'"></span>
+                </button>
+            </div>
+
+            <!-- Status message -->
+            <div x-show="settingsBackupMessage" class="mt-3 p-3 rounded-lg text-sm"
+                 :class="settingsBackupOk ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'"
+                 x-text="settingsBackupMessage"></div>
+        </section>
+
                 <div x-show="appVersion" class="bg-white rounded-b-lg px-6 py-3 text-center border-t border-gray-100">
                     <span class="text-[11px] text-gray-400" x-text="'U1 Slicer Bridge ' + appVersion"></span>
                 </div>
