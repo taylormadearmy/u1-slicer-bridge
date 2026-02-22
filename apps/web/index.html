@@ -419,6 +419,21 @@
                                         </button>
                                     </div>
                                 </template>
+                                <div class="flex items-center gap-2">
+                                    <span class="text-sm font-medium text-gray-700">Scale:</span>
+                                    <div class="flex items-center gap-1">
+                                        <input type="number" min="10" max="500" step="10"
+                                               x-model.number="sliceSettings.scale_percent"
+                                               @blur="sliceSettings.scale_percent = Math.min(500, Math.max(10, sliceSettings.scale_percent || 100))"
+                                               class="w-20 px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                               data-testid="scale-input"
+                                               placeholder="100">
+                                        <span class="text-sm text-gray-500">%</span>
+                                    </div>
+                                </div>
+                                <p class="text-xs text-gray-500 w-full">
+                                    Applies uniform scaling to all objects before slicing.
+                                </p>
                                 <span x-show="copiesApplying" class="text-xs text-blue-600 flex items-center gap-1">
                                     <svg class="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
                                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>

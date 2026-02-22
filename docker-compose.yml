@@ -37,7 +37,7 @@ services:
   web:
     build: ./apps/web
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_PORT:-8234}:80"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:80/ || exit 1"]

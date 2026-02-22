@@ -226,7 +226,7 @@ test.describe('Multiple Copies (M32)', () => {
       };
     };
 
-    const scaleInput = page.locator('div:has(span:has-text("Scale:")) input[type="number"]').first();
+    const scaleInput = page.getByTestId('scale-input');
     await scaleInput.fill('500');
     await page.getByRole('button', { name: /Slice Now/i }).click();
     await waitForSliceComplete(page);

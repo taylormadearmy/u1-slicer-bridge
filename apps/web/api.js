@@ -150,7 +150,8 @@ class ApiClient {
             bed_temp: settings.bed_temp,
             bed_type: settings.bed_type,
             filament_colors: settings.filament_colors,
-            extruder_assignments: settings.extruder_assignments
+            extruder_assignments: settings.extruder_assignments,
+            scale_percent: settings.scale_percent ?? 100
         };
 
         // Support both single filament_id and filament_ids array
@@ -209,7 +210,8 @@ class ApiClient {
             bed_temp: settings.bed_temp,
             bed_type: settings.bed_type,
             filament_colors: settings.filament_colors,
-            extruder_assignments: settings.extruder_assignments
+            extruder_assignments: settings.extruder_assignments,
+            scale_percent: settings.scale_percent ?? 100
         };
 
         // Support both single filament_id and filament_ids array

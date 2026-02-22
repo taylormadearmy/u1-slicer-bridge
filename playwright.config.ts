@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:8080';
+const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:8234';
 const apiHealthURL = process.env.PLAYWRIGHT_API_HEALTH_URL || 'http://localhost:8000/healthz';
 const isArm64 = process.arch === 'arm64';
 const isRemoteBaseUrl = !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/?$/i.test(baseURL);

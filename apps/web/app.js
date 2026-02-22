@@ -141,6 +141,7 @@ function app() {
             enable_flow_calibrate: true,
             bed_temp: null,
             bed_type: null,
+            scale_percent: 100,
         },
         useJobOverrides: false,
         sliceSettings: {
@@ -167,6 +168,7 @@ function app() {
             nozzle_temp: null,
             bed_temp: null,
             bed_type: null,
+            scale_percent: 100,
             filament_colors: [],  // Override colors per extruder
             extruder_assignments: [0, 1, 2, 3],  // Which extruder each color uses (E1=0, E2=1, etc)
         },
@@ -411,6 +413,7 @@ function app() {
                 'bed_temp', 'bed_type',
             ];
             const s = {};
+            s.scale_percent = this.sliceSettings.scale_percent ?? 100;
             for (const key of modeKeys) {
                 const mode = this.settingModes[key] || 'model';
                 if (mode === 'override') {
@@ -1313,6 +1316,10 @@ function app() {
                 this.showError('Please select a plate to slice');
                 return;
             }
+
+            const requestedScale = Number(this.sliceSettings.scale_percent) || 100;
+            const scalePercent = Math.min(500, Math.max(10, requestedScale));
+            this.sliceSettings.scale_percent = scalePercent;
 
             // Capture current upload info before starting (in case selection changes)
             const uploadId = this.selectedUpload.upload_id;
