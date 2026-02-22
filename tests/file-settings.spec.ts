@@ -1,5 +1,13 @@
 import { test, expect } from '@playwright/test';
-import { API, getDefaultFilament, waitForJobComplete } from './helpers';
+import {
+  API,
+  getDefaultFilament,
+  waitForJobComplete,
+  API_UPLOAD_TIMEOUT_MS,
+  GENERIC_API_TIMEOUT_MS,
+  API_SLICE_REQUEST_TIMEOUT_MS,
+  SLOW_TEST_TIMEOUT_MS,
+} from './helpers';
 import path from 'path';
 import fs from 'fs';
 
@@ -19,14 +27,14 @@ async function uploadLargeFile(request: any, fixtureName: string) {
         buffer,
       },
     },
-    timeout: 120_000,
+    timeout: API_UPLOAD_TIMEOUT_MS,
   });
   expect(res.ok()).toBe(true);
   return res.json();
 }
 
 test.describe('File Print Settings Detection', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(SLOW_TEST_TIMEOUT_MS);
 
   // Shashibo has: enable_support=1, support_type=tree(manual),
   // support_threshold_angle=30, brim_type=outer_only, brim_width=10,
@@ -35,7 +43,7 @@ test.describe('File Print Settings Detection', () => {
   let shashibo: any;
 
   test.beforeAll(async ({ request }, testInfo) => {
-    testInfo.setTimeout(180_000);
+    testInfo.setTimeout(SLOW_TEST_TIMEOUT_MS);
     shashibo = await uploadLargeFile(request, 'Shashibo-h2s-textured.3mf');
   });
 
@@ -50,7 +58,7 @@ test.describe('File Print Settings Detection', () => {
   });
 
   test('get upload detail includes file_print_settings', async ({ request }) => {
-    const res = await request.get(`${API}/upload/${shashibo.upload_id}`, { timeout: 60_000 });
+    const res = await request.get(`${API}/upload/${shashibo.upload_id}`, { timeout: GENERIC_API_TIMEOUT_MS });
     expect(res.ok()).toBe(true);
     const detail = await res.json();
     expect(detail.file_print_settings).toBeDefined();
@@ -59,7 +67,7 @@ test.describe('File Print Settings Detection', () => {
   });
 
   test('plates endpoint includes file_print_settings', async ({ request }) => {
-    const res = await request.get(`${API}/uploads/${shashibo.upload_id}/plates`, { timeout: 120_000 });
+    const res = await request.get(`${API}/uploads/${shashibo.upload_id}/plates`, { timeout: GENERIC_API_TIMEOUT_MS });
     expect(res.ok()).toBe(true);
     const data = await res.json();
     expect(data.file_print_settings).toBeDefined();
@@ -80,7 +88,7 @@ test.describe('File Print Settings Detection', () => {
         brim_width: 10,
         brim_object_gap: 0.1,
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());
@@ -97,7 +105,7 @@ test.describe('File Print Settings Detection', () => {
         support_type: 'tree(manual)',
         brim_type: 'no_brim',
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());

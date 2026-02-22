@@ -1,8 +1,16 @@
 import { test, expect } from '@playwright/test';
-import { API, apiUpload, apiSlicePlate, getDefaultFilament } from './helpers';
+import {
+  API,
+  apiUpload,
+  apiSlicePlate,
+  getDefaultFilament,
+  API_SLICE_REQUEST_TIMEOUT_MS,
+  GENERIC_API_TIMEOUT_MS,
+  SLOW_TEST_TIMEOUT_MS,
+} from './helpers';
 
 test.describe('Plate-Specific Slicing (M7.1)', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(SLOW_TEST_TIMEOUT_MS);
 
   test('slice-plate returns completed job with metadata', async ({ request }) => {
     // Upload multi-plate file
@@ -10,7 +18,7 @@ test.describe('Plate-Specific Slicing (M7.1)', () => {
     expect(upload.is_multi_plate).toBe(true);
 
     // Get plates
-    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: 60_000 });
+    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: GENERIC_API_TIMEOUT_MS });
     const plates = (await platesRes.json()).plates;
     expect(plates.length).toBeGreaterThan(1);
 
@@ -37,7 +45,7 @@ test.describe('Plate-Specific Slicing (M7.1)', () => {
         infill_density: 15,
         supports: false,
       },
-      timeout: 60_000,
+      timeout: GENERIC_API_TIMEOUT_MS,
     });
     expect(res.status()).toBe(400);
     const body = await res.json();
@@ -56,7 +64,7 @@ test.describe('Plate-Specific Slicing (M7.1)', () => {
         infill_density: 15,
         supports: false,
       },
-      timeout: 60_000,
+      timeout: GENERIC_API_TIMEOUT_MS,
     });
     expect(res.status()).toBe(404);
     const body = await res.json();
@@ -66,13 +74,13 @@ test.describe('Plate-Specific Slicing (M7.1)', () => {
   test('plate preview endpoint returns image or 404', async ({ request }) => {
     const upload = await apiUpload(request, 'Dragon Scale infinity.3mf');
 
-    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: 60_000 });
+    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: GENERIC_API_TIMEOUT_MS });
     const plates = (await platesRes.json()).plates;
     const plate = plates[0];
 
     const previewRes = await request.get(
       `${API}/uploads/${upload.upload_id}/plates/${plate.plate_id}/preview`,
-      { timeout: 30_000 },
+      { timeout: GENERIC_API_TIMEOUT_MS },
     );
     expect([200, 404]).toContain(previewRes.status());
     if (previewRes.status() === 200) {

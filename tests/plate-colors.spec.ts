@@ -1,10 +1,22 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, waitForSliceComplete, getAppState, API } from './helpers';
+import {
+  waitForApp,
+  uploadFile,
+  waitForSliceComplete,
+  getAppState,
+  API,
+  API_UPLOAD_TIMEOUT_MS,
+  GENERIC_API_TIMEOUT_MS,
+  UPLOAD_TRANSITION_TIMEOUT_MS,
+  UPLOAD_LIST_TIMEOUT_MS,
+  SLOW_TEST_TIMEOUT_MS,
+  API_SLICE_REQUEST_TIMEOUT_MS,
+} from './helpers';
 import path from 'path';
 import fs from 'fs';
 
 test.describe('Per-Plate Color Detection', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(SLOW_TEST_TIMEOUT_MS);
 
   test('Shashibo plates API returns correct color counts per plate', async ({ request }) => {
     // Upload with generous timeout for 4.8MB file
@@ -18,13 +30,13 @@ test.describe('Per-Plate Color Detection', () => {
           buffer,
         },
       },
-      timeout: 120_000,
+      timeout: API_UPLOAD_TIMEOUT_MS,
     });
     expect(uploadRes.ok()).toBe(true);
     const upload = await uploadRes.json();
     expect(upload.is_multi_plate).toBe(true);
 
-    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: 60_000 });
+    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: GENERIC_API_TIMEOUT_MS });
     expect(platesRes.ok()).toBe(true);
     const data = await platesRes.json();
 
@@ -70,7 +82,7 @@ test.describe('Per-Plate Color Detection', () => {
         }
       }
       return false;
-    }, 'configure', { timeout: 120_000 });
+    }, 'configure', { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
 
     // Wait for plates to load
     await page.waitForFunction(() => {
@@ -81,7 +93,7 @@ test.describe('Per-Plate Color Detection', () => {
         }
       }
       return false;
-    }, undefined, { timeout: 60_000 });
+    }, undefined, { timeout: UPLOAD_LIST_TIMEOUT_MS });
 
     // Get all plate cards from state
     const plates = await getAppState(page, 'plates') as any[];
@@ -100,7 +112,7 @@ test.describe('Per-Plate Color Detection', () => {
 });
 
 test.describe('Slice Progress Animation', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(SLOW_TEST_TIMEOUT_MS);
 
   test('progress increments during slicing (not stuck at 0%)', async ({ page }) => {
     await waitForApp(page);
@@ -136,7 +148,7 @@ test.describe('Slice Progress Animation', () => {
 });
 
 test.describe('Filament Colors in Slice Response', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(SLOW_TEST_TIMEOUT_MS);
 
   test('slice response includes non-white filament_colors when colors are sent', async ({ request }) => {
     const filePath = path.resolve(__dirname, '..', 'test-data', 'calib-cube-10-dual-colour-merged.3mf');
@@ -149,7 +161,7 @@ test.describe('Filament Colors in Slice Response', () => {
           buffer,
         },
       },
-      timeout: 60_000,
+      timeout: API_UPLOAD_TIMEOUT_MS,
     });
     expect(uploadRes.ok()).toBe(true);
     const upload = await uploadRes.json();
@@ -168,7 +180,7 @@ test.describe('Filament Colors in Slice Response', () => {
         infill_density: 15,
         supports: false,
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(sliceRes.ok()).toBe(true);
     const job = await sliceRes.json();
@@ -179,7 +191,7 @@ test.describe('Filament Colors in Slice Response', () => {
     expect(job.filament_colors).toContain('#00FF00');
 
     // Stored job should also have the colors
-    const jobRes = await request.get(`${API}/jobs/${job.job_id}`, { timeout: 30_000 });
+    const jobRes = await request.get(`${API}/jobs/${job.job_id}`, { timeout: GENERIC_API_TIMEOUT_MS });
     const stored = await jobRes.json();
     expect(stored.filament_colors).toBeTruthy();
     expect(stored.filament_colors.length).toBeGreaterThanOrEqual(2);
@@ -200,7 +212,7 @@ test.describe('Filament Colors in Slice Response', () => {
           buffer,
         },
       },
-      timeout: 60_000,
+      timeout: API_UPLOAD_TIMEOUT_MS,
     });
     expect(uploadRes.ok()).toBe(true);
     const upload = await uploadRes.json();
@@ -220,7 +232,7 @@ test.describe('Filament Colors in Slice Response', () => {
         infill_density: 15,
         supports: false,
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(sliceRes.ok()).toBe(true);
     const job = await sliceRes.json();

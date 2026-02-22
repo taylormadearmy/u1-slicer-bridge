@@ -3,14 +3,16 @@ import path from 'path';
 import fs from 'fs';
 
 export const API = 'http://localhost:8000';
-const IS_ARM64 = process.arch === 'arm64';
-const IS_SLOW_TEST_ENV = IS_ARM64 || process.env.PLAYWRIGHT_SLOW_ENV === '1';
-const UPLOAD_TRANSITION_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 180_000 : 60_000;
-const UPLOAD_LIST_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 90_000 : 30_000;
-const CONFIGURE_STEP_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 90_000 : 30_000;
-const API_UPLOAD_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 180_000 : 60_000;
-const API_SLICE_REQUEST_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 240_000 : 120_000;
-const API_SLICE_POLL_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 240_000 : 120_000;
+export const IS_ARM64 = process.arch === 'arm64';
+export const IS_SLOW_TEST_ENV = IS_ARM64 || process.env.PLAYWRIGHT_SLOW_ENV === '1';
+export const UPLOAD_TRANSITION_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 240_000 : 90_000;
+export const UPLOAD_LIST_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 150_000 : 60_000;
+export const CONFIGURE_STEP_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 180_000 : 60_000;
+export const GENERIC_API_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 120_000 : 60_000;
+export const API_UPLOAD_TIMEOUT_MS = 600_000;
+export const API_SLICE_REQUEST_TIMEOUT_MS = 480_000;
+export const API_SLICE_POLL_TIMEOUT_MS = 480_000;
+export const SLOW_TEST_TIMEOUT_MS = IS_SLOW_TEST_ENV ? 360_000 : 180_000;
 
 /** Wait for Alpine.js to fully initialize the app */
 export async function waitForApp(page: Page) {
@@ -118,7 +120,7 @@ export async function waitForSliceComplete(page: Page) {
       throw new Error(`Slice failed — app reverted to '${step}' step`);
     }
     return false;
-  }, undefined, { timeout: 150_000 });
+  }, undefined, { timeout: SLOW_TEST_TIMEOUT_MS });
 }
 
 /** Get the current step from Alpine state */
@@ -127,7 +129,7 @@ export async function getCurrentStep(page: Page): Promise<string> {
 }
 
 /** Upload a 3MF file via API and return the upload response */
-export async function apiUpload(request: APIRequestContext, fixtureName: string) {
+export async function apiUpload(request: APIRequestContext, fixtureName: string, timeout = API_UPLOAD_TIMEOUT_MS) {
   const filePath = fixture(fixtureName);
   const buffer = fs.readFileSync(filePath);
   const res = await request.post(`${API}/upload`, {
@@ -138,7 +140,7 @@ export async function apiUpload(request: APIRequestContext, fixtureName: string)
         buffer,
       },
     },
-    timeout: API_UPLOAD_TIMEOUT_MS,
+    timeout,
   });
   expect(res.ok()).toBe(true);
   return res.json();

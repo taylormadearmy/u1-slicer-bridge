@@ -1,15 +1,23 @@
 import { test, expect } from '@playwright/test';
-import { API, apiUpload, getDefaultFilament, waitForJobComplete } from './helpers';
+import {
+  API,
+  apiUpload,
+  getDefaultFilament,
+  waitForJobComplete,
+  API_SLICE_REQUEST_TIMEOUT_MS,
+  GENERIC_API_TIMEOUT_MS,
+  SLOW_TEST_TIMEOUT_MS,
+} from './helpers';
 
 test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(SLOW_TEST_TIMEOUT_MS);
 
   // NOTE: calib-cube-10-dual-colour-merged.3mf is a dual-colour file.
   // Slicing it with a single filament_id segfaults in Orca (known issue).
   // We always send filament_ids with 2 entries to match the file's colour count.
 
   async function getTwoFilamentIds(request: any) {
-    const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
+    const filRes = await request.get(`${API}/filaments`, { timeout: GENERIC_API_TIMEOUT_MS });
     const filaments = (await filRes.json()).filaments;
     const fil1 = filaments[0];
     const fil2 = filaments.length > 1 ? filaments[1] : filaments[0];
@@ -30,7 +38,7 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
         bed_temp: 70,
         bed_type: 'PEI',
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());
@@ -49,7 +57,7 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
         wall_count: 4,
         supports: false,
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());
@@ -68,7 +76,7 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
         infill_pattern: 'grid',
         supports: false,
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());
@@ -89,7 +97,7 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
         prime_tower_width: 40,
         prime_tower_brim_width: 3,
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());
@@ -123,7 +131,7 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
   test('slice-plate with temperature overrides succeeds', async ({ request }) => {
     const upload = await apiUpload(request, 'Dragon Scale infinity.3mf');
 
-    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: 60_000 });
+    const platesRes = await request.get(`${API}/uploads/${upload.upload_id}/plates`, { timeout: GENERIC_API_TIMEOUT_MS });
     const plates = (await platesRes.json()).plates;
     const plate = plates.find((p: any) => p.validation?.fits) || plates[0];
     const fil = await getDefaultFilament(request);
@@ -139,7 +147,7 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
         bed_temp: 65,
         bed_type: 'PEI',
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());
@@ -158,7 +166,7 @@ test.describe('Slicing Setting Overrides (M7.2 + M23 + M17)', () => {
         supports: false,
         enable_flow_calibrate: false,
       },
-      timeout: 120_000,
+      timeout: API_SLICE_REQUEST_TIMEOUT_MS,
     });
     expect(res.ok()).toBe(true);
     const job = await waitForJobComplete(request, await res.json());

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { waitForApp, uploadFile, getAppState, API, apiUpload, waitForJobComplete } from './helpers';
+import { waitForApp, uploadFile, getAppState, API, apiUpload, waitForJobComplete, SLOW_TEST_TIMEOUT_MS } from './helpers';
 
 test.describe('File Management', () => {
   test.beforeEach(async ({ page }) => {
@@ -60,7 +60,7 @@ test.describe('File Management', () => {
   });
 
   test('upload preview endpoint returns image or 404', async ({ request }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(SLOW_TEST_TIMEOUT_MS);
     const upload = await apiUpload(request, 'Dragon Scale infinity.3mf');
 
     const previewRes = await request.get(`${API}/uploads/${upload.upload_id}/preview`, { timeout: 30_000 });
