@@ -606,6 +606,99 @@ class ProfileEmbedder:
             pass
         return False
 
+    def _analyze_source_3mf(self, source_3mf: Path) -> Dict[str, Any]:
+        """Single-pass analysis of a source 3MF for embedding decisions.
+
+        Opens the ZIP once and returns all detection results that would
+        otherwise require 5-7 separate ZIP opens:
+        - is_bambu, has_multi_extruder_assignments, has_layer_tool_changes,
+          has_paint_data, is_multi_plate, assigned_extruder_count
+        """
+        result = {
+            "is_bambu": False,
+            "has_multi_extruder_assignments": False,
+            "has_layer_tool_changes": False,
+            "has_paint_data": False,
+            "is_multi_plate": False,
+            "assigned_extruder_count": 1,
+        }
+        try:
+            with zipfile.ZipFile(source_3mf, 'r') as zf:
+                names = set(zf.namelist())
+
+                # Bambu detection
+                bambu_markers = {
+                    'Metadata/model_settings.config',
+                    'Metadata/slice_info.config',
+                    'Metadata/filament_sequence.json'
+                }
+                result["is_bambu"] = bool(bambu_markers & names)
+
+                # Extruder assignments + count from model_settings.config
+                if 'Metadata/model_settings.config' in names:
+                    root = ET.fromstring(zf.read('Metadata/model_settings.config'))
+                    extruders = set()
+                    for meta in root.findall('.//metadata'):
+                        if meta.get('key') == 'extruder':
+                            raw = (meta.get('value') or '').strip()
+                            if raw:
+                                try:
+                                    idx = int(raw)
+                                    if idx > 0:
+                                        extruders.add(idx)
+                                except ValueError:
+                                    pass
+                    result["has_multi_extruder_assignments"] = len(extruders) > 1
+                    result["assigned_extruder_count"] = max(extruders) if extruders else 1
+
+                # Layer tool changes from custom_gcode_per_layer.xml
+                if 'Metadata/custom_gcode_per_layer.xml' in names:
+                    cg_root = ET.fromstring(zf.read('Metadata/custom_gcode_per_layer.xml'))
+                    for layer in cg_root.findall('.//layer'):
+                        if layer.get('type') == '2':
+                            result["has_layer_tool_changes"] = True
+                            break
+
+                # Multi-plate detection (count build items)
+                if '3D/3dmodel.model' in names:
+                    model_root = ET.fromstring(zf.read('3D/3dmodel.model'))
+                    mns = {"m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"}
+                    build = model_root.find("m:build", mns)
+                    if build is not None:
+                        items = build.findall("m:item", mns)
+                        result["is_multi_plate"] = len(items) > 1
+
+                # Paint data scan (chunked, capped at 32 MB per .model file)
+                MAX_SCAN = 32 * 1024 * 1024
+                CHUNK = 1024 * 1024
+                needles = (b"paint_color", b"mmu_segmentation")
+                for name in names:
+                    if not name.endswith(".model"):
+                        continue
+                    try:
+                        scanned = 0
+                        with zf.open(name) as f:
+                            while scanned < MAX_SCAN:
+                                chunk = f.read(CHUNK)
+                                if not chunk:
+                                    break
+                                for needle in needles:
+                                    if needle in chunk:
+                                        result["has_paint_data"] = True
+                                        break
+                                if result["has_paint_data"]:
+                                    break
+                                scanned += len(chunk)
+                    except Exception:
+                        pass
+                    if result["has_paint_data"]:
+                        break
+
+        except Exception as e:
+            logger.warning(f"Failed to analyze source 3MF: {e}")
+
+        return result
+
     def _sanitize_wipe_tower_position(
         self,
         config: Dict[str, Any],
@@ -1093,22 +1186,36 @@ class ProfileEmbedder:
             profiles = self.load_snapmaker_profiles()
 
             preserve_model_settings_from = None
-            is_bambu = precomputed_is_bambu if precomputed_is_bambu is not None else self._is_bambu_file(source_3mf)
-            has_multi_assignments = precomputed_has_multi_assignments if precomputed_has_multi_assignments is not None else self._has_multi_extruder_assignments(source_3mf)
-            has_layer_changes = precomputed_has_layer_changes if precomputed_has_layer_changes is not None else self._has_layer_tool_changes(source_3mf)
+
+            # Single-pass analysis (1 ZIP open instead of 5-7)
+            if precomputed_is_bambu is not None:
+                # Use precomputed values if available
+                is_bambu = precomputed_is_bambu
+                has_multi_assignments = precomputed_has_multi_assignments if precomputed_has_multi_assignments is not None else False
+                has_layer_changes = precomputed_has_layer_changes if precomputed_has_layer_changes is not None else False
+                # Only do single-pass analysis for remaining checks
+                _need_extra = (not has_multi_assignments and not has_layer_changes and is_bambu)
+                if _need_extra:
+                    analysis = self._analyze_source_3mf(source_3mf)
+                    has_paint = analysis["has_paint_data"]
+                    is_multi_plate = analysis["is_multi_plate"]
+                else:
+                    has_paint = False
+                    is_multi_plate = False
+            else:
+                analysis = self._analyze_source_3mf(source_3mf)
+                is_bambu = analysis["is_bambu"]
+                has_multi_assignments = analysis["has_multi_extruder_assignments"]
+                has_layer_changes = analysis["has_layer_tool_changes"]
+                has_paint = analysis["has_paint_data"]
+                is_multi_plate = analysis["is_multi_plate"]
 
             needs_preserve = has_multi_assignments or has_layer_changes
             if not needs_preserve and is_bambu and requested_filament_count > 1:
-                needs_preserve = self._has_paint_data_zip(source_3mf)
-            if not needs_preserve and is_bambu:
-                try:
-                    from multi_plate_parser import parse_multi_plate_3mf as _parse_mp
-                    _, is_multi = _parse_mp(source_3mf)
-                    if is_multi:
-                        needs_preserve = True
-                        logger.info("Bambu multi-plate file detected — using preserve path to keep plate structure")
-                except Exception:
-                    pass
+                needs_preserve = has_paint
+            if not needs_preserve and is_bambu and is_multi_plate:
+                needs_preserve = True
+                logger.info("Bambu multi-plate file detected — using preserve path to keep plate structure")
 
             if is_bambu and needs_preserve:
                 reason = (

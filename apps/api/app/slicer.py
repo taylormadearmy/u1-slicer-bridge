@@ -344,10 +344,19 @@ class OrcaSlicer:
             "filament_used_mm": metadata.filament_used_mm,
             "filament_used_g": metadata.filament_used_g,
             "layer_count": metadata.layer_count,
+            "min_x": metadata.min_x,
+            "min_y": metadata.min_y,
+            "min_z": metadata.min_z,
+            "max_x": metadata.max_x,
+            "max_y": metadata.max_y,
+            "max_z": metadata.max_z,
             "bounds": {
+                "min_x": metadata.min_x,
+                "min_y": metadata.min_y,
+                "min_z": metadata.min_z,
                 "max_x": metadata.max_x,
                 "max_y": metadata.max_y,
-                "max_z": metadata.max_z
+                "max_z": metadata.max_z,
             }
         }
 

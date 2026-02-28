@@ -835,3 +835,515 @@ def extract_3mf_metadata_batch(file_path: Path) -> Dict[str, Any]:
         pass
 
     return result
+
+
+import re as _re_module  # for preview asset indexing
+
+
+def extract_upload_metadata(file_path: Path) -> Dict[str, Any]:
+    """Single-pass extraction of ALL upload-processing metadata from a 3MF.
+
+    Opens the ZIP once and gathers everything that _process_3mf_sync needs:
+    colors, per-plate colors, print settings, preview asset index, and the
+    Bambu Z-offset artifact flag.  Replaces 6+ separate function calls that
+    each opened the ZIP independently.
+
+    Returns dict with:
+        detected_colors: List[str]          — hex color codes
+        colors_per_plate: Dict[int, List[str]]
+        print_settings: Dict[str, Any]
+        preview_assets: {"by_plate": {...}, "best": str|None}
+        has_bambu_z_offset: bool            — source_offset_z present in model_settings
+    """
+    result: Dict[str, Any] = {
+        "detected_colors": [],
+        "colors_per_plate": {},
+        "print_settings": {},
+        "preview_assets": {"by_plate": {}, "best": None},
+        "has_bambu_z_offset": False,
+    }
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            names = set(zf.namelist())
+
+            # ── Shared data loaded once ────────────────────────────
+            project_settings = None
+            if "Metadata/project_settings.config" in names:
+                try:
+                    project_settings = json.loads(zf.read("Metadata/project_settings.config"))
+                except (ValueError, KeyError):
+                    pass
+
+            model_settings_root = None
+            has_source_offset_z = False
+            if "Metadata/model_settings.config" in names:
+                try:
+                    model_settings_root = ET.fromstring(zf.read("Metadata/model_settings.config"))
+                    has_source_offset_z = any(
+                        m.get("key") == "source_offset_z"
+                        for m in model_settings_root.findall(".//metadata")
+                    )
+                except ET.ParseError:
+                    pass
+
+            result["has_bambu_z_offset"] = (
+                has_source_offset_z
+                and project_settings is not None
+            )
+
+            # ── Assigned extruders (from model_settings) ──────────
+            assigned_extruders: List[int] = []
+            if model_settings_root is not None:
+                exts_set: set = set()
+                for meta in model_settings_root.findall('.//metadata'):
+                    if meta.get('key') == 'extruder':
+                        raw = (meta.get('value') or '').strip()
+                        if raw:
+                            try:
+                                idx = int(raw)
+                                if idx > 0:
+                                    exts_set.add(idx)
+                            except ValueError:
+                                pass
+                assigned_extruders = sorted(exts_set)
+
+            # ── Layer tool changes ────────────────────────────────
+            layer_changes: Dict[int, List[Dict[str, Any]]] = {}
+            if 'Metadata/custom_gcode_per_layer.xml' in names:
+                try:
+                    cg_root = ET.fromstring(zf.read('Metadata/custom_gcode_per_layer.xml'))
+                    for plate_el in cg_root.findall("plate"):
+                        p_id = 0
+                        info = plate_el.find("plate_info")
+                        if info is not None:
+                            try:
+                                p_id = int(info.get("id", "0"))
+                            except ValueError:
+                                pass
+                        changes: List[Dict[str, Any]] = []
+                        for layer in plate_el.findall("layer"):
+                            if layer.get("type") != "2":
+                                continue
+                            try:
+                                z = float(layer.get("top_z", "0"))
+                            except ValueError:
+                                z = 0.0
+                            try:
+                                ext = int(layer.get("extruder", "1"))
+                            except ValueError:
+                                ext = 1
+                            color = layer.get("color", "")
+                            changes.append({"z": z, "extruder": ext, "color": color})
+                        if changes and p_id > 0:
+                            layer_changes[p_id] = changes
+                except ET.ParseError:
+                    pass
+
+            # ── Paint data detection (chunked scan) ───────────────
+            has_paint = False
+            MAX_SCAN = 32 * 1024 * 1024
+            CHUNK = 1024 * 1024
+            needles = (b"paint_color", b"mmu_segmentation")
+            for name in names:
+                if not name.endswith(".model"):
+                    continue
+                try:
+                    scanned = 0
+                    with zf.open(name) as f:
+                        while scanned < MAX_SCAN:
+                            chunk = f.read(CHUNK)
+                            if not chunk:
+                                break
+                            for needle in needles:
+                                if needle in chunk:
+                                    has_paint = True
+                                    break
+                            if has_paint:
+                                break
+                            scanned += len(chunk)
+                except Exception:
+                    pass
+                if has_paint:
+                    break
+
+            # ── Filament colours from project_settings ────────────
+            filament_colors: List[str] = []
+            if project_settings:
+                fc = project_settings.get("filament_colour", [])
+                if isinstance(fc, list):
+                    filament_colors = fc
+
+            # ── Detect colors (consolidated from detect_colors_from_3mf) ──
+            detected_colors: List[str] = []
+
+            # Try filament_sequence.json first
+            if 'Metadata/filament_sequence.json' in names:
+                try:
+                    seq = json.loads(zf.read('Metadata/filament_sequence.json'))
+                    if "filament_info" in seq:
+                        for filament in seq["filament_info"]:
+                            color = filament.get("color", "#FFFFFF")
+                            if not color.startswith("#"):
+                                color = "#" + color
+                            detected_colors.append(color)
+                    for plate_name, plate_data in seq.items():
+                        if isinstance(plate_data, dict) and "sequence" in plate_data:
+                            for filament in plate_data["sequence"]:
+                                color = filament.get("color", "#FFFFFF")
+                                if not color.startswith("#"):
+                                    color = "#" + color
+                                detected_colors.append(color)
+                except (KeyError, ValueError):
+                    pass
+
+            # Paint data → return all filament colors
+            if filament_colors and len(filament_colors) > 1 and has_paint:
+                active = [c for c in filament_colors if c]
+                if active:
+                    detected_colors = active
+
+            # Layer tool changes → map used extruders to colors
+            elif layer_changes and filament_colors:
+                ext_indices: set = {1}
+                for changes in layer_changes.values():
+                    for ch in changes:
+                        ext_indices.add(ch.get("extruder", 1))
+                active = _extruders_to_colors(ext_indices, filament_colors)
+                if len(active) > 1:
+                    detected_colors = active
+
+            # Assigned extruders → map to colors
+            elif assigned_extruders and filament_colors:
+                active = []
+                for ext in assigned_extruders:
+                    idx = ext - 1
+                    if 0 <= idx < len(filament_colors):
+                        c = filament_colors[idx]
+                        if c and c not in active:
+                            active.append(c)
+                if active:
+                    detected_colors = active
+
+            # Fallback: extruder_colour / filament_colour from project_settings
+            if not detected_colors and project_settings:
+                for key in ("extruder_colour", "filament_colour"):
+                    vals = project_settings.get(key, [])
+                    if isinstance(vals, list):
+                        for c in vals:
+                            if c and c not in detected_colors:
+                                detected_colors.append(c)
+
+            # PrusaSlicer fallback
+            if not detected_colors:
+                try:
+                    pe_data = zf.read("Metadata/Slic3r_PE.config").decode("utf-8", errors="replace")
+                    pe_extruder_colours: List[str] = []
+                    for line in pe_data.splitlines():
+                        stripped = line.lstrip("; ").strip()
+                        if stripped.startswith("extruder_colour"):
+                            _, _, value = stripped.partition("=")
+                            value = value.strip()
+                            if value:
+                                pe_extruder_colours = [c.strip() for c in value.split(";") if c.strip()]
+                            break
+                    if pe_extruder_colours:
+                        if has_paint:
+                            detected_colors = pe_extruder_colours
+                        else:
+                            try:
+                                model_cfg = zf.read("Metadata/Slic3r_PE_model.config").decode("utf-8", errors="replace")
+                                model_cfg_root = ET.fromstring(model_cfg)
+                                pe_assigned: set = set()
+                                for meta in model_cfg_root.findall('.//metadata'):
+                                    if meta.get('key') == 'extruder' and meta.get('type') == 'object':
+                                        raw = (meta.get('value') or '').strip()
+                                        if raw:
+                                            try:
+                                                pe_assigned.add(int(raw))
+                                            except ValueError:
+                                                pass
+                                if len(pe_assigned) > 1:
+                                    detected_colors = _extruders_to_colors(pe_assigned, pe_extruder_colours)
+                            except (KeyError, ET.ParseError):
+                                pass
+                except KeyError:
+                    pass
+
+            # Deduplicate
+            seen: set = set()
+            unique: List[str] = []
+            for c in detected_colors:
+                if c not in seen:
+                    seen.add(c)
+                    unique.append(c)
+            result["detected_colors"] = unique
+
+            # ── Per-plate colors (consolidated from detect_colors_per_plate) ──
+            colors_per_plate: Dict[int, List[str]] = {}
+            if filament_colors:
+                num_extruders = 2
+                if project_settings:
+                    ext_colours = project_settings.get("extruder_colour", [])
+                    if isinstance(ext_colours, list) and len(ext_colours) >= 2:
+                        num_extruders = len(ext_colours)
+
+                # Source 1: Layer tool changes
+                source1: Dict[int, List[str]] = {}
+                if layer_changes:
+                    for pid, changes in layer_changes.items():
+                        ext_indices = {1}
+                        for ch in changes:
+                            ext_indices.add(ch.get("extruder", 1))
+                        plate_colors = _extruders_to_colors(ext_indices, filament_colors)
+                        if plate_colors:
+                            source1[pid] = plate_colors
+
+                # Source 2: Per-object/part extruder from model_settings
+                source2: Dict[int, List[str]] = {}
+                if model_settings_root is not None:
+                    obj_extruders: Dict[str, set] = {}
+                    for obj_elem in model_settings_root.findall("object"):
+                        oid = obj_elem.get("id")
+                        if not oid:
+                            continue
+                        exts: set = set()
+                        ext_meta = obj_elem.find("metadata[@key='extruder']")
+                        if ext_meta is not None:
+                            try:
+                                exts.add(int(ext_meta.get("value", "1")))
+                            except ValueError:
+                                pass
+                        for part in obj_elem.findall("part"):
+                            part_ext = part.find("metadata[@key='extruder']")
+                            if part_ext is not None:
+                                try:
+                                    exts.add(int(part_ext.get("value", "1")))
+                                except ValueError:
+                                    pass
+                        if exts:
+                            obj_extruders[oid] = exts
+
+                    # Map objects to plates via build items
+                    try:
+                        model_xml = zf.read("3D/3dmodel.model")
+                        root = ET.fromstring(model_xml)
+                        mns = {"m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"}
+                        build = root.find("m:build", mns)
+                        if build is not None:
+                            for i, item in enumerate(build.findall("m:item", mns)):
+                                pid = i + 1
+                                obj_id = item.get("objectid", "")
+                                exts = obj_extruders.get(obj_id, {1})
+                                plate_colors = _extruders_to_colors(exts, filament_colors)
+                                if plate_colors:
+                                    source2[pid] = plate_colors
+                    except (KeyError, ET.ParseError):
+                        pass
+
+                # Source 3: Wipe tower in plate_N.json
+                wipe_tower_plates: set = set()
+                for name in names:
+                    if not name.startswith("Metadata/plate_") or not name.endswith(".json"):
+                        continue
+                    try:
+                        plate_data = json.loads(zf.read(name))
+                        bbox_objects = plate_data.get("bbox_objects", [])
+                        has_wipe = any(o.get("name") == "wipe_tower" for o in bbox_objects)
+                        if has_wipe:
+                            num_str = name.split("plate_")[1].split(".")[0]
+                            wipe_tower_plates.add(int(num_str))
+                    except Exception:
+                        pass
+
+                # Merge sources
+                all_plate_ids = set(source1.keys()) | set(source2.keys()) | wipe_tower_plates
+                for pid in all_plate_ids:
+                    s1 = source1.get(pid, [])
+                    s2 = source2.get(pid, [])
+                    if len(s2) >= 2:
+                        colors_per_plate[pid] = s2
+                    elif len(s1) >= 2:
+                        colors_per_plate[pid] = s1
+                    elif s2:
+                        colors_per_plate[pid] = s2
+                    elif s1:
+                        colors_per_plate[pid] = s1
+
+                    if pid in wipe_tower_plates and len(colors_per_plate.get(pid, [])) < 2:
+                        multi = _extruders_to_colors(set(range(1, num_extruders + 1)), filament_colors)
+                        if len(multi) >= 2:
+                            colors_per_plate[pid] = multi
+
+            result["colors_per_plate"] = colors_per_plate
+
+            # ── Print settings (consolidated from detect_print_settings) ──
+            if project_settings:
+                settings = _extract_print_settings_from_config(project_settings)
+                result["print_settings"] = settings
+
+            # ── Preview assets (consolidated from _index_preview_assets) ──
+            preview_map: Dict[int, str] = {}
+            best_preview = None
+            image_names = [
+                n for n in names
+                if n.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                and "/metadata/" in f"/{n.lower()}"
+            ]
+            for img_name in image_names:
+                lower = img_name.lower()
+                match = _re_module.search(r"(?:plate|top|pick|thumbnail|preview|cover)[_\-]?(\d+)", lower)
+                if not match:
+                    match = _re_module.search(r"[_\-/](\d+)\.(?:png|jpg|jpeg|webp)$", lower)
+                if not match:
+                    continue
+                pid = int(match.group(1))
+                if pid not in preview_map:
+                    preview_map[pid] = img_name
+
+            if image_names:
+                def _score(path: str):
+                    p = path.lower()
+                    for i, kw in enumerate(["thumbnail", "preview", "cover", "top", "plate", "pick"]):
+                        if kw in p:
+                            return (i, len(p))
+                    return (9, len(p))
+                best_preview = sorted(image_names, key=_score)[0]
+
+            result["preview_assets"] = {"by_plate": preview_map, "best": best_preview}
+
+    except Exception:
+        pass
+
+    return result
+
+
+def _extract_print_settings_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract print settings from a parsed project_settings.config dict.
+
+    Pure function — no file I/O.  Shared by both extract_upload_metadata()
+    and the standalone detect_print_settings().
+    """
+    settings: Dict[str, Any] = {}
+
+    def _as_bool(val) -> bool:
+        return str(val).strip() in ("1", "true", "True")
+
+    def _as_int(val):
+        try:
+            return int(float(str(val)))
+        except (ValueError, TypeError):
+            return None
+
+    def _as_float(val, decimals=2):
+        try:
+            return round(float(str(val)), decimals)
+        except (ValueError, TypeError):
+            return None
+
+    def _first_element(val):
+        if isinstance(val, list) and val:
+            return val[0]
+        return val
+
+    # support
+    raw = config.get("enable_support")
+    if raw is not None:
+        settings["enable_support"] = _as_bool(raw)
+    raw = config.get("support_type")
+    if raw is not None and str(raw).strip():
+        settings["support_type"] = str(raw).strip()
+    raw = config.get("support_threshold_angle")
+    if raw is not None:
+        v = _as_int(raw)
+        if v is not None:
+            settings["support_threshold_angle"] = v
+
+    # brim
+    raw = config.get("brim_type")
+    if raw is not None and str(raw).strip():
+        settings["brim_type"] = str(raw).strip()
+    raw = config.get("brim_width")
+    if raw is not None:
+        v = _as_float(raw)
+        if v is not None:
+            settings["brim_width"] = v
+    raw = config.get("brim_object_gap")
+    if raw is not None:
+        v = _as_float(raw)
+        if v is not None:
+            settings["brim_object_gap"] = v
+
+    # skirt
+    raw = config.get("skirt_loops")
+    if raw is not None:
+        v = _as_int(raw)
+        if v is not None:
+            settings["skirt_loops"] = v
+    raw = config.get("skirt_distance")
+    if raw is not None:
+        v = _as_float(raw)
+        if v is not None:
+            settings["skirt_distance"] = v
+    raw = config.get("skirt_height")
+    if raw is not None:
+        v = _as_int(raw)
+        if v is not None:
+            settings["skirt_height"] = v
+
+    # wall / infill / layer
+    raw = config.get("wall_loops")
+    if raw is not None:
+        v = _as_int(raw)
+        if v is not None:
+            settings["wall_loops"] = v
+    raw = config.get("sparse_infill_density")
+    if raw is not None:
+        v = _as_int(str(raw).replace("%", ""))
+        if v is not None:
+            settings["sparse_infill_density"] = v
+    raw = config.get("sparse_infill_pattern")
+    if raw is not None and str(raw).strip():
+        settings["sparse_infill_pattern"] = str(raw).strip()
+    raw = config.get("layer_height")
+    if raw is not None:
+        v = _as_float(raw)
+        if v is not None:
+            settings["layer_height"] = v
+
+    # prime tower
+    raw = config.get("enable_prime_tower")
+    if raw is not None:
+        settings["enable_prime_tower"] = _as_bool(raw)
+    raw = config.get("prime_tower_width")
+    if raw is not None:
+        v = _as_int(raw)
+        if v is not None:
+            settings["prime_tower_width"] = v
+    raw = config.get("prime_tower_brim_width")
+    if raw is not None:
+        v = _as_int(raw)
+        if v is not None and v >= 0:
+            settings["prime_tower_brim_width"] = v
+    raw = config.get("filament_prime_volume")
+    if raw is not None:
+        v = _as_int(_first_element(raw))
+        if v is not None:
+            settings["prime_volume"] = v
+
+    # temperature / bed
+    raw = config.get("nozzle_temperature")
+    if raw is not None:
+        v = _as_int(_first_element(raw))
+        if v is not None:
+            settings["nozzle_temperature"] = v
+    raw = config.get("bed_temperature")
+    if raw is not None:
+        v = _as_int(_first_element(raw))
+        if v is not None:
+            settings["bed_temperature"] = v
+    raw = config.get("curr_bed_type")
+    if raw is not None and str(raw).strip():
+        settings["curr_bed_type"] = str(raw).strip()
+
+    return settings

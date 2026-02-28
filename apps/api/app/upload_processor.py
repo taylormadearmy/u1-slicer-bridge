@@ -11,10 +11,10 @@ import logging
 from pathlib import Path
 
 from db import get_pg_pool
-from parser_3mf import parse_3mf, detect_colors_from_3mf, detect_colors_per_plate, detect_print_settings
+from parser_3mf import extract_upload_metadata
 from plate_validator import PlateValidator, PlateValidationError
 from config import get_printer_profile
-from multi_plate_parser import parse_multi_plate_3mf
+from multi_plate_parser import parse_multi_plate_3mf, calculate_all_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +25,18 @@ def _process_3mf_sync(file_path: Path, filename: str):
     Runs in a worker thread via asyncio.to_thread() to avoid blocking the
     event loop for large/complex files.
 
+    Optimised to minimise ZIP opens:
+      1. parse_multi_plate_3mf  → ZIP open #1 (plates + structure)
+      2. calculate_all_bounds   → ZIP open #2 (single-pass vertex scan)
+      3. extract_upload_metadata → ZIP open #3 (colors, settings, previews)
+      4. validate_precomputed_bounds → pure math, no I/O
+
     Returns a dict with all parsed data needed for DB insert + response.
     Raises ValueError (400) or RuntimeError (500).
     """
-    # Parse .3mf and extract object/plate metadata
+    # ── Step 1: Parse plates (ZIP open #1) ────────────────────────
     try:
         plates, is_multi_plate = parse_multi_plate_3mf(file_path)
-        objects = parse_3mf(file_path)
     except ValueError as e:
         file_path.unlink(missing_ok=True)
         raise ValueError(str(e))
@@ -39,48 +44,82 @@ def _process_3mf_sync(file_path: Path, filename: str):
         file_path.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to parse .3mf: {str(e)}")
 
-    if not objects:
+    # ── Step 2: Single-pass bounds for ALL plates (ZIP open #2) ───
+    try:
+        all_bounds = calculate_all_bounds(file_path, plates)
+    except ValueError as e:
+        file_path.unlink(missing_ok=True)
+        raise ValueError(str(e))
+    except Exception as e:
+        file_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to calculate bounds: {str(e)}")
+
+    objects_count = all_bounds["objects_count"]
+    if objects_count == 0:
         file_path.unlink(missing_ok=True)
         raise ValueError("No valid objects found in .3mf file")
 
-    objects_count = len(objects)
+    # ── Step 3: Single-pass metadata extraction (ZIP open #3) ─────
+    metadata = extract_upload_metadata(file_path)
+    detected_colors = metadata["detected_colors"]
+    file_print_settings = metadata["print_settings"]
+    colors_per_plate = metadata["colors_per_plate"]
+    preview_assets = metadata["preview_assets"]
+    has_bambu_z_offset = metadata["has_bambu_z_offset"]
 
-    # Validate plate bounds
+    # ── Step 4: Validate bounds (no I/O) ──────────────────────────
     try:
         printer_profile = get_printer_profile("snapmaker_u1")
         validator = PlateValidator(printer_profile)
-        validation = validator.validate_3mf_bounds(file_path, plates=plates)
 
+        # Validate combined bounds
+        combined_bounds = all_bounds["combined"]
+        validation = validator.validate_precomputed_bounds(
+            combined_bounds, is_multi_plate=is_multi_plate,
+            is_bambu_z_offset=has_bambu_z_offset,
+        )
+        validation["is_multi_plate"] = is_multi_plate
+        validation["plates"] = [p.to_dict() for p in plates] if is_multi_plate else []
+
+        # Validate per-plate bounds
         plate_validations = []
-        if validation.get('is_multi_plate'):
-            for plate in validation.get('plates', []):
-                try:
-                    plate_id = plate['plate_id']
-                    plate_validation = validator.validate_3mf_bounds(file_path, plate_id, plates=plates)
+        if is_multi_plate:
+            for plate in plates:
+                pid = plate.plate_id
+                plate_bounds = all_bounds["per_plate"].get(pid)
+                if plate_bounds:
+                    pv = validator.validate_precomputed_bounds(
+                        plate_bounds, is_bambu_z_offset=has_bambu_z_offset,
+                    )
                     plate_validations.append({
-                        "plate_id": plate['plate_id'],
-                        "bounds": plate_validation['bounds'],
-                        "warnings": plate_validation['warnings'],
-                        "fits": plate_validation['fits']
+                        "plate_id": pid,
+                        "bounds": pv["bounds"],
+                        "warnings": pv["warnings"],
+                        "fits": pv["fits"],
                     })
-                except Exception as e:
-                    logger.error(f"Failed to validate plate {plate.get('plate_id')}: {str(e)}")
+                else:
                     plate_validations.append({
-                        "plate_id": plate.get('plate_id'),
-                        "error": str(e),
-                        "fits": False
+                        "plate_id": pid,
+                        "error": "No geometry found",
+                        "fits": False,
                     })
 
-            any_plate_fits = any(p.get('fits', False) for p in plate_validations)
+            # If any individual plate fits, suppress combined-level size warnings
+            any_plate_fits = any(p.get("fits", False) for p in plate_validations)
             if any_plate_fits:
-                validation['warnings'] = [
-                    w for w in validation.get('warnings', [])
+                validation["warnings"] = [
+                    w for w in validation.get("warnings", [])
                     if "exceeds build volume" not in w.lower()
                     and "multi-plate file with" not in w.lower()
                 ]
-                validation['fits'] = True
-        else:
-            plate_validations = []
+                validation["fits"] = True
+
+            # Add multi-plate advisory
+            validation["warnings"].append(
+                f"Multi-plate file with {len(plates)} plates. "
+                "Individual plates may fit even if combined bounds exceed build volume."
+            )
+
     except PlateValidationError as e:
         file_path.unlink(missing_ok=True)
         raise ValueError(f"Plate validation failed: {str(e)}")
@@ -88,34 +127,12 @@ def _process_3mf_sync(file_path: Path, filename: str):
         file_path.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to validate plate: {str(e)}")
 
-    # Detect colors and print settings
-    detected_colors = []
-    try:
-        detected_colors = detect_colors_from_3mf(file_path)
-    except Exception as e:
-        logger.warning(f"Failed to detect colors: {e}")
-
-    file_print_settings = {}
-    try:
-        file_print_settings = detect_print_settings(file_path)
-    except Exception as e:
-        logger.warning(f"Failed to detect print settings: {e}")
-
-    # Build plate_metadata cache for multi-plate files
-    is_multi_plate = validation.get('is_multi_plate', False)
+    # ── Build plate_metadata cache for multi-plate files ──────────
     plate_metadata_json = None
     if is_multi_plate and plates:
-        from routes_slice import _index_preview_assets
         try:
-            preview_assets = _index_preview_assets(file_path)
             preview_map = preview_assets.get("by_plate", {})
             has_generic_preview = isinstance(preview_assets.get("best"), str)
-
-            colors_per_plate = {}
-            try:
-                colors_per_plate = detect_colors_per_plate(file_path)
-            except Exception:
-                pass
 
             plate_info_cache = []
             for plate in plates:
