@@ -990,6 +990,99 @@ def _calculate_xml_bounds(file_path: Path,
     return result
 
 
+def calculate_all_bounds(file_path: Path,
+                         plates: List[PlateInfo]) -> Dict[str, Any]:
+    """Single-pass bounds computation for all plates + combined.
+
+    Opens the ZIP once, scans vertex bounds for every build item, and returns
+    both per-plate and combined bounds in a single pass.  Also returns the
+    number of geometry-bearing objects found (replaces separate parse_3mf call).
+
+    Returns:
+        {
+            "combined": {"min": [...], "max": [...], "size": [...]},
+            "per_plate": {
+                plate_id: {"min": [...], "max": [...], "size": [...]},
+                ...
+            },
+            "objects_count": int,
+        }
+    """
+    is_multi_plate = len(plates) > 1
+
+    ns = {
+        "m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
+        "p": "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    }
+
+    with zipfile.ZipFile(file_path, "r") as zf:
+        model_xml = zf.read("3D/3dmodel.model")
+        root = ET.fromstring(model_xml)
+
+        resources = root.find("m:resources", ns)
+        if resources is None:
+            raise ValueError("3MF missing resources section")
+
+        # Build object_id -> element map
+        obj_map: Dict[str, Any] = {}
+        for obj in resources.findall("m:object", ns):
+            oid = obj.get("id")
+            if oid:
+                obj_map[oid] = obj
+
+        build = root.find("m:build", ns)
+        items = build.findall("m:item", ns) if build is not None else []
+
+        # Scan all items in one pass, accumulating per-plate bounds
+        combined_min = [float('inf')] * 3
+        combined_max = [float('-inf')] * 3
+        per_plate_bounds: Dict[int, Dict[str, list]] = {}
+        objects_count = 0
+
+        for idx, item in enumerate(items):
+            plate_id = idx + 1
+            obj_id = item.get("objectid")
+            if not obj_id or obj_id not in obj_map:
+                continue
+
+            bounds = _scan_object_bounds(zf, obj_map[obj_id], ns)
+            if bounds is None:
+                continue
+
+            objects_count += 1
+            bmin, bmax = bounds
+            item_t = _parse_3mf_transform_values(item.get("transform", ""))
+            tbmin, tbmax = _apply_affine_to_bounds_3x4(bmin, bmax, item_t)
+
+            # Update combined bounds
+            for i in range(3):
+                if tbmin[i] < combined_min[i]:
+                    combined_min[i] = tbmin[i]
+                if tbmax[i] > combined_max[i]:
+                    combined_max[i] = tbmax[i]
+
+            # Store per-plate bounds
+            per_plate_bounds[plate_id] = {
+                "min": list(tbmin),
+                "max": list(tbmax),
+                "size": [tbmax[i] - tbmin[i] for i in range(3)],
+            }
+
+    if not per_plate_bounds:
+        combined_min = [0.0, 0.0, 0.0]
+        combined_max = [0.0, 0.0, 0.0]
+
+    return {
+        "combined": {
+            "min": combined_min,
+            "max": combined_max,
+            "size": [combined_max[i] - combined_min[i] for i in range(3)],
+        },
+        "per_plate": per_plate_bounds,
+        "objects_count": objects_count,
+    }
+
+
 def get_plate_bounds(file_path: Path,
                      plate_id: Optional[int] = None,
                      plates: Optional[List[PlateInfo]] = None) -> Dict[str, Any]:

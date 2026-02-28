@@ -14,7 +14,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Tuple
+from typing import Any, Optional, List, Dict, Tuple
 
 from db import get_pg_pool
 from config import get_printer_profile
@@ -39,6 +39,12 @@ router = APIRouter(tags=["slicing"])
 logger = logging.getLogger(__name__)
 INT32_MAX = 2_147_483_647
 
+# Module-level compiled regex patterns for G-code parsing (avoid per-call recompilation)
+_RE_GCODE_COORD = re.compile(r'([XYZ])([\d.-]+)')
+_RE_GCODE_FIELDS = re.compile(r'([GXYZEF])([\d.-]+)')
+_RE_LAYER_CHANGE = re.compile(r'^;\s*(LAYER_CHANGE|CHANGE_LAYER)\b', re.IGNORECASE)
+_RE_LAYER_NUMBER = re.compile(r'^;\s*LAYER\s*:\s*(\d+)\b', re.IGNORECASE)
+
 # ---------------------------------------------------------------------------
 # In-memory progress store for active slicing jobs.
 # Keys are job_id strings.  Values: {"progress": 0-100, "message": str}
@@ -59,16 +65,80 @@ def _clear_progress(job_id: str):
     _job_progress.pop(job_id, None)
 
 
-def _get_bambu_plate_for_object(source_3mf: Path, object_id: str) -> Optional[int]:
+def _load_bambu_plate_metadata(source_3mf: Path) -> Optional[Dict[str, Any]]:
+    """Single-pass extraction of all Bambu plate metadata.
+
+    Opens the ZIP once and returns all plate mapping info needed by the
+    slice-plate route, replacing 4-5 separate ZIP opens.
+
+    Returns None if not a Bambu file. Otherwise returns:
+        {
+            "object_to_plater": {object_id_str: plater_id_int},
+            "plater_to_objects": {plater_id_int: [object_id_str, ...]},
+            "oid_to_build_idx": {object_id_str: build_item_index_1based},
+        }
+    """
+    try:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(source_3mf, 'r') as zf:
+            if 'Metadata/model_settings.config' not in zf.namelist():
+                return None
+
+            # Parse model_settings.config for plate→object mappings
+            ms_root = ET.fromstring(zf.read('Metadata/model_settings.config'))
+            object_to_plater: Dict[str, int] = {}
+            plater_to_objects: Dict[int, List[str]] = {}
+            for plate in ms_root.findall('.//plate'):
+                plater_id = None
+                for meta in plate.findall('metadata'):
+                    if meta.get('key') == 'plater_id':
+                        try:
+                            plater_id = int(meta.get('value'))
+                        except (TypeError, ValueError):
+                            pass
+                if plater_id is None:
+                    continue
+                plate_oids: List[str] = []
+                for mi in plate.findall('model_instance'):
+                    for m in mi.findall('metadata'):
+                        if m.get('key') == 'object_id':
+                            oid = str(m.get('value'))
+                            object_to_plater[oid] = plater_id
+                            plate_oids.append(oid)
+                if plate_oids:
+                    plater_to_objects[plater_id] = plate_oids
+
+            # Build object_id → build_item_index map from model XML
+            oid_to_build_idx: Dict[str, int] = {}
+            if '3D/3dmodel.model' in zf.namelist():
+                model_root = ET.fromstring(zf.read('3D/3dmodel.model'))
+                ns_3mf = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+                build = model_root.find(f"{{{ns_3mf}}}build")
+                if build is not None:
+                    for i, item in enumerate(build.findall(f"{{{ns_3mf}}}item"), start=1):
+                        oid = item.get("objectid")
+                        if oid:
+                            oid_to_build_idx[oid] = i
+
+            return {
+                "object_to_plater": object_to_plater,
+                "plater_to_objects": plater_to_objects,
+                "oid_to_build_idx": oid_to_build_idx,
+            }
+    except Exception as e:
+        logger.warning(f"Could not load Bambu plate metadata: {e}")
+        return None
+
+
+def _get_bambu_plate_for_object(source_3mf: Path, object_id: str,
+                                preloaded: Optional[Dict] = None) -> Optional[int]:
     """Look up the Bambu plater_id that contains the given object_id.
 
-    Bambu Studio stores plate→object mappings in model_settings.config as
-    <plate> elements containing <model_instance> entries with object_id values.
-    Our multi_plate_parser maps build <item> indices to "plates", which differ
-    from Bambu's plater_id numbering in multi-plate files.
-
-    Returns the plater_id (1-indexed) or None if not found.
+    If `preloaded` is provided (from _load_bambu_plate_metadata), avoids ZIP open.
     """
+    if preloaded is not None:
+        return preloaded["object_to_plater"].get(str(object_id))
+
     try:
         import xml.etree.ElementTree as ET
         with zipfile.ZipFile(source_3mf, 'r') as zf:
@@ -89,12 +159,15 @@ def _get_bambu_plate_for_object(source_3mf: Path, object_id: str) -> Optional[in
     return None
 
 
-def _get_bambu_plate_object_ids(source_3mf: Path, plater_id: int) -> List[str]:
+def _get_bambu_plate_object_ids(source_3mf: Path, plater_id: int,
+                                preloaded: Optional[Dict] = None) -> List[str]:
     """Return all object_ids assigned to the given Bambu plater_id.
 
-    Used to expand a single-object transform to all co-objects on the same
-    Bambu plate so they move as a group and don't collide.
+    If `preloaded` is provided (from _load_bambu_plate_metadata), avoids ZIP open.
     """
+    if preloaded is not None:
+        return preloaded["plater_to_objects"].get(plater_id, [])
+
     result: List[str] = []
     try:
         import xml.etree.ElementTree as ET
@@ -117,12 +190,34 @@ def _get_bambu_plate_object_ids(source_3mf: Path, plater_id: int) -> List[str]:
     return result
 
 
-def _get_bambu_co_plate_indices(source_3mf: Path, plate_id: int) -> Optional[List[int]]:
+def _get_bambu_co_plate_indices(source_3mf: Path, plate_id: int,
+                                preloaded: Optional[Dict] = None) -> Optional[List[int]]:
     """Return all build_item indices sharing the same Bambu plate as `plate_id`.
 
-    Returns None if not a Bambu file or no model_settings.config found.
-    Returns a list of 1-based build_item indices (including `plate_id` itself).
+    If `preloaded` is provided (from _load_bambu_plate_metadata), avoids all ZIP opens.
     """
+    if preloaded is not None:
+        oid_to_idx = preloaded["oid_to_build_idx"]
+        items_count = max(oid_to_idx.values()) if oid_to_idx else 0
+        if plate_id < 1 or plate_id > items_count:
+            return None
+        # Find the object_id for the requested plate_id
+        target_oid = None
+        for oid, idx in oid_to_idx.items():
+            if idx == plate_id:
+                target_oid = oid
+                break
+        if not target_oid:
+            return None
+        bambu_pid = preloaded["object_to_plater"].get(target_oid)
+        if bambu_pid is None:
+            return None
+        co_oids = preloaded["plater_to_objects"].get(bambu_pid, [])
+        if len(co_oids) <= 1:
+            return None
+        co_indices = sorted(oid_to_idx[oid] for oid in co_oids if oid in oid_to_idx)
+        return co_indices if len(co_indices) > 1 else None
+
     try:
         import xml.etree.ElementTree as ET
         with zipfile.ZipFile(source_3mf, 'r') as zf:
@@ -1876,7 +1971,13 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                     layer_count = $7,
                     three_mf_path = $8,
                     filament_colors = $9,
-                    filament_used_g = $10
+                    filament_used_g = $10,
+                    gcode_bounds_min_x = $11,
+                    gcode_bounds_min_y = $12,
+                    gcode_bounds_min_z = $13,
+                    gcode_bounds_max_x = $14,
+                    gcode_bounds_max_y = $15,
+                    gcode_bounds_max_z = $16
                 WHERE job_id = $1 AND status = 'processing'
                 """,
                 job_id,
@@ -1888,7 +1989,13 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 metadata.get('layer_count'),
                 str(embedded_3mf),
                 filament_colors_json,
-                filament_used_g_json
+                filament_used_g_json,
+                metadata.get('min_x', 0.0),
+                metadata.get('min_y', 0.0),
+                metadata.get('min_z', 0.0),
+                metadata.get('max_x', 0.0),
+                metadata.get('max_y', 0.0),
+                metadata.get('max_z', 0.0),
             )
             if result_tag == "UPDATE 0":
                 job_logger.info(f"Job {job_id} was cancelled before completion could be recorded")
@@ -2604,7 +2711,13 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                     layer_count = $7,
                     three_mf_path = $8,
                     filament_colors = $9,
-                    filament_used_g = $10
+                    filament_used_g = $10,
+                    gcode_bounds_min_x = $11,
+                    gcode_bounds_min_y = $12,
+                    gcode_bounds_min_z = $13,
+                    gcode_bounds_max_x = $14,
+                    gcode_bounds_max_y = $15,
+                    gcode_bounds_max_z = $16
                 WHERE job_id = $1 AND status = 'processing'
                 """,
                 job_id,
@@ -2616,7 +2729,13 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 metadata.get('layer_count'),
                 str(embedded_3mf),
                 filament_colors_json,
-                filament_used_g_json
+                filament_used_g_json,
+                metadata.get('min_x', 0.0),
+                metadata.get('min_y', 0.0),
+                metadata.get('min_z', 0.0),
+                metadata.get('max_x', 0.0),
+                metadata.get('max_y', 0.0),
+                metadata.get('max_z', 0.0),
             )
             if result_tag == "UPDATE 0":
                 job_logger.info(f"Job {job_id} was cancelled before completion could be recorded")
@@ -2893,7 +3012,8 @@ async def get_upload_layout(upload_id: int, plate_id: Optional[int] = Query(None
         # so the placement viewer shows the full plate group, not just one item.
         effective_plate_ids = None
         if plate_id is not None:
-            co_indices = _get_bambu_co_plate_indices(source_3mf, plate_id)
+            bambu_meta = _load_bambu_plate_metadata(source_3mf)
+            co_indices = _get_bambu_co_plate_indices(source_3mf, plate_id, preloaded=bambu_meta)
             if co_indices:
                 effective_plate_ids = co_indices
 
@@ -2990,7 +3110,8 @@ async def get_upload_geometry(
     # so the placement viewer shows the full plate group geometry.
     effective_plate_ids = None
     if plate_id is not None and build_item_index is None:
-        co_indices = _get_bambu_co_plate_indices(source_3mf, plate_id)
+        bambu_meta = await asyncio.to_thread(_load_bambu_plate_metadata, source_3mf)
+        co_indices = _get_bambu_co_plate_indices(source_3mf, plate_id, preloaded=bambu_meta)
         if co_indices:
             effective_plate_ids = co_indices
 
@@ -3024,20 +3145,82 @@ async def get_upload_geometry(
         raise HTTPException(status_code=500, detail=f"Failed to load geometry: {str(e)}")
 
 
+# In-memory preview cache: (upload_id, plate_id_or_"best") → (image_bytes, media_type)
+# Small footprint (thumbnails are typically <100 KB each).
+_preview_cache: Dict[Tuple[int, str], Tuple[bytes, str]] = {}
+
+
+def _get_cached_preview(upload_id: int, plate_key: str, source_3mf: Path) -> Optional[Tuple[bytes, str]]:
+    """Return cached (image_bytes, media_type) or extract from ZIP and cache."""
+    cache_key = (upload_id, plate_key)
+    if cache_key in _preview_cache:
+        return _preview_cache[cache_key]
+
+    # Single ZIP open: index + extract in one shot
+    try:
+        with zipfile.ZipFile(source_3mf, "r") as zf:
+            names = zf.namelist()
+            image_names = [
+                n for n in names
+                if n.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                and "/metadata/" in f"/{n.lower()}"
+            ]
+
+            if plate_key == "best":
+                if not image_names:
+                    return None
+                def _score(path: str):
+                    p = path.lower()
+                    for i, kw in enumerate(["thumbnail", "preview", "cover", "top", "plate", "pick"]):
+                        if kw in p:
+                            return (i, len(p))
+                    return (9, len(p))
+                internal_path = sorted(image_names, key=_score)[0]
+            else:
+                pid = int(plate_key)
+                preview_map: Dict[int, str] = {}
+                for img_name in image_names:
+                    lower = img_name.lower()
+                    match = re.search(r"(?:plate|top|pick|thumbnail|preview|cover)[_\-]?(\d+)", lower)
+                    if not match:
+                        match = re.search(r"[_\-/](\d+)\.(?:png|jpg|jpeg|webp)$", lower)
+                    if match:
+                        img_pid = int(match.group(1))
+                        if img_pid not in preview_map:
+                            preview_map[img_pid] = img_name
+
+                internal_path = preview_map.get(pid)
+                if not internal_path and pid == 1:
+                    # Fallback to best generic preview for plate 1
+                    if image_names:
+                        def _score(path: str):
+                            p = path.lower()
+                            for i, kw in enumerate(["thumbnail", "preview", "cover", "top", "plate", "pick"]):
+                                if kw in p:
+                                    return (i, len(p))
+                            return (9, len(p))
+                        internal_path = sorted(image_names, key=_score)[0]
+
+                if not internal_path:
+                    return None
+
+            image_bytes = zf.read(internal_path)
+            media_type = _guess_image_media_type(internal_path)
+            _preview_cache[cache_key] = (image_bytes, media_type)
+            return (image_bytes, media_type)
+    except Exception:
+        return None
+
+
 @router.get("/uploads/{upload_id}/plates/{plate_id}/preview")
 async def get_upload_plate_preview(upload_id: int, plate_id: int):
     """Return embedded preview image for a specific plate when available."""
     pool = get_pg_pool()
     async with pool.acquire() as conn:
         upload = await conn.fetchrow(
-            """
-            SELECT id, file_path
-            FROM uploads
-            WHERE id = $1
-            """,
+            "SELECT id, file_path FROM uploads WHERE id = $1",
             upload_id,
         )
-
         if not upload:
             raise HTTPException(status_code=404, detail="Upload not found")
 
@@ -3045,24 +3228,11 @@ async def get_upload_plate_preview(upload_id: int, plate_id: int):
     if not source_3mf.exists():
         raise HTTPException(status_code=404, detail="Source 3MF file not found")
 
-    assets = _index_preview_assets(source_3mf)
-    by_plate_obj = assets.get("by_plate")
-    preview_map: Dict[int, str] = by_plate_obj if isinstance(by_plate_obj, dict) else {}
-    internal_path = preview_map.get(plate_id)
-    if not internal_path and plate_id == 1:
-        best_preview = assets.get("best")
-        if isinstance(best_preview, str):
-            internal_path = best_preview
-    if not internal_path:
+    result = _get_cached_preview(upload_id, str(plate_id), source_3mf)
+    if not result:
         raise HTTPException(status_code=404, detail="Plate preview not available")
 
-    try:
-        with zipfile.ZipFile(source_3mf, "r") as zf:
-            image_bytes = zf.read(internal_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read plate preview: {e}")
-
-    return Response(content=image_bytes, media_type=_guess_image_media_type(internal_path))
+    return Response(content=result[0], media_type=result[1])
 
 
 @router.get("/uploads/{upload_id}/preview")
@@ -3071,14 +3241,9 @@ async def get_upload_preview(upload_id: int):
     pool = get_pg_pool()
     async with pool.acquire() as conn:
         upload = await conn.fetchrow(
-            """
-            SELECT id, file_path
-            FROM uploads
-            WHERE id = $1
-            """,
+            "SELECT id, file_path FROM uploads WHERE id = $1",
             upload_id,
         )
-
         if not upload:
             raise HTTPException(status_code=404, detail="Upload not found")
 
@@ -3086,18 +3251,11 @@ async def get_upload_preview(upload_id: int):
     if not source_3mf.exists():
         raise HTTPException(status_code=404, detail="Source 3MF file not found")
 
-    assets = _index_preview_assets(source_3mf)
-    best_preview = assets.get("best")
-    if not isinstance(best_preview, str) or not best_preview:
+    result = _get_cached_preview(upload_id, "best", source_3mf)
+    if not result:
         raise HTTPException(status_code=404, detail="Upload preview not available")
 
-    try:
-        with zipfile.ZipFile(source_3mf, "r") as zf:
-            image_bytes = zf.read(best_preview)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read upload preview: {e}")
-
-    return Response(content=image_bytes, media_type=_guess_image_media_type(best_preview))
+    return Response(content=result[0], media_type=result[1])
 
 
 @router.get("/jobs/{job_id}")
@@ -3341,7 +3499,9 @@ async def get_gcode_metadata(job_id: str):
         job = await conn.fetchrow(
             """
             SELECT gcode_path, status, layer_count,
-                   estimated_time_seconds, filament_used_mm
+                   estimated_time_seconds, filament_used_mm,
+                   gcode_bounds_min_x, gcode_bounds_min_y, gcode_bounds_min_z,
+                   gcode_bounds_max_x, gcode_bounds_max_y, gcode_bounds_max_z
             FROM slicing_jobs
             WHERE job_id = $1
             """,
@@ -3358,8 +3518,18 @@ async def get_gcode_metadata(job_id: str):
         if not gcode_path.exists():
             raise HTTPException(status_code=404, detail="G-code file not found")
 
-    # Parse G-code for bounds
-    bounds = _parse_gcode_bounds(gcode_path)
+    # Use cached bounds from DB if available, else fall back to file scan (legacy jobs)
+    if job["gcode_bounds_max_x"] is not None:
+        bounds = {
+            "min_x": job["gcode_bounds_min_x"] or 0.0,
+            "min_y": job["gcode_bounds_min_y"] or 0.0,
+            "min_z": job["gcode_bounds_min_z"] or 0.0,
+            "max_x": job["gcode_bounds_max_x"] or 0.0,
+            "max_y": job["gcode_bounds_max_y"] or 0.0,
+            "max_z": job["gcode_bounds_max_z"] or 0.0,
+        }
+    else:
+        bounds = _parse_gcode_bounds(gcode_path)
 
     return {
         "layer_count": job["layer_count"] or 0,
@@ -3404,7 +3574,6 @@ def _parse_gcode_bounds(gcode_path: Path) -> Dict[str, float]:
     }
 
     current_x, current_y, current_z = 0.0, 0.0, 0.0
-    pattern = re.compile(r'([XYZ])([\d.-]+)')
 
     try:
         with open(gcode_path, 'r') as f:
@@ -3416,7 +3585,7 @@ def _parse_gcode_bounds(gcode_path: Path) -> Dict[str, float]:
                     continue
 
                 # Parse coordinates
-                parts = dict(pattern.findall(line))
+                parts = dict(_RE_GCODE_COORD.findall(line))
 
                 if 'X' in parts:
                     current_x = float(parts['X'])
@@ -3464,9 +3633,9 @@ def _parse_gcode_layers(gcode_path: Path, start: int, count: int) -> List[Dict]:
     relative_extrusion = False
     layer_moves = []
 
-    pattern = re.compile(r'([GXYZEF])([\d.-]+)')
-    layer_comment_re = re.compile(r'^;\s*(LAYER_CHANGE|CHANGE_LAYER)\b', re.IGNORECASE)
-    layer_number_re = re.compile(r'^;\s*LAYER\s*:\s*(\d+)\b', re.IGNORECASE)
+    pattern = _RE_GCODE_FIELDS
+    layer_comment_re = _RE_LAYER_CHANGE
+    layer_number_re = _RE_LAYER_NUMBER
 
     def flush_layer() -> bool:
         """Flush current buffered moves if layer is in range.

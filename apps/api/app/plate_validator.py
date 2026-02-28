@@ -164,6 +164,45 @@ class PlateValidator:
 
         return warnings
 
+    def validate_precomputed_bounds(self, bounds: dict,
+                                    is_multi_plate: bool = False,
+                                    is_bambu_z_offset: bool = False) -> dict:
+        """Validate pre-computed bounds against build volume (no file I/O).
+
+        Args:
+            bounds: {"min": [x,y,z], "max": [x,y,z], "size": [w,d,h]}
+            is_multi_plate: whether this is a multi-plate file
+            is_bambu_z_offset: whether Bambu source_offset_z artifact was detected
+
+        Returns:
+            {"bounds": ..., "warnings": [...], "fits": bool}
+        """
+        width = float(bounds['size'][0])
+        depth = float(bounds['size'][1])
+        height = float(bounds['size'][2])
+
+        build_volume_warnings = self._check_build_volume(width, depth, height)
+        warnings = list(build_volume_warnings)
+
+        # Check for objects below bed
+        if bounds['min'][2] < -0.001:
+            if is_bambu_z_offset and bounds['min'][2] >= -15.0:
+                logger.info(
+                    "Suppressing below-bed warning (Bambu source-offset artifact, Z_min=%.3f)",
+                    float(bounds['min'][2]),
+                )
+            else:
+                warnings.append(
+                    f"Warning: Objects extend below bed (Z_min = {bounds['min'][2]:.1f}mm). "
+                    "This may cause printing issues."
+                )
+
+        return {
+            "bounds": bounds,
+            "warnings": warnings,
+            "fits": len(build_volume_warnings) == 0,
+        }
+
     def _is_bambu_z_offset_artifact(self, file_path: Path, min_z: float) -> bool:
         """Heuristic for Bambu-exported files with metadata-induced negative Z.
 

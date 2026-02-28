@@ -148,6 +148,7 @@ Avoid:
 - hidden state
 - plaintext secrets
 - skipping tests after changes (even "small" ones can break things)
+- **assuming test failures are pre-existing or flaky** — if a test fails after your changes, investigate it as a regression caused by your code. Never dismiss failures without evidence they were already failing before your changes
 
 ### Release & Docker Images
 

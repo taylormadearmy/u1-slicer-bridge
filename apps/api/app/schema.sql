@@ -101,6 +101,16 @@ ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS filament_colors TEXT;
 -- Migration: Add filament_used_g column to existing databases
 ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS filament_used_g TEXT;
 
+-- Migration: Cache G-code bounds in DB (avoids full file rescan on every viewer open)
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS gcode_bounds_min_x REAL;
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS gcode_bounds_min_y REAL;
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS gcode_bounds_min_z REAL;
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS gcode_bounds_max_x REAL;
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS gcode_bounds_max_y REAL;
+ALTER TABLE slicing_jobs ADD COLUMN IF NOT EXISTS gcode_bounds_max_z REAL;
+
+CREATE INDEX IF NOT EXISTS idx_slicing_jobs_status ON slicing_jobs(status);
+
 -- Persistent extruder preset mapping (E1-E4)
 CREATE TABLE IF NOT EXISTS extruder_presets (
     slot INTEGER PRIMARY KEY,

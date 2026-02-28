@@ -229,14 +229,19 @@ function app() {
 
             // Load initial data — printer check runs in parallel so it
             // doesn't block file lists when Moonraker is slow/unreachable.
-            this.fetchVersion(); // non-blocking
-            this.loadOrcaDefaults(); // non-blocking
-            this.loadPrinterSettings(); // non-blocking, pre-load for settings modal
-            this.checkPrinterStatus(false); // non-blocking — updates header indicator async
-            await this.loadFilaments();
-            await this.loadExtruderPresets();
-            await this.loadRecentUploads();
-            await this.loadJobs();
+            // Fire-and-forget calls (no await needed)
+            this.fetchVersion();
+            this.loadOrcaDefaults();
+            this.loadPrinterSettings();
+            this.checkPrinterStatus(false);
+
+            // Load essential data in parallel (these are independent)
+            await Promise.all([
+                this.loadFilaments(),
+                this.loadExtruderPresets(),
+                this.loadRecentUploads(),
+                this.loadJobs(),
+            ]);
 
             // Set up periodic printer status check
             setInterval(() => this.checkPrinterStatus(this.webcamsExpanded), 30000); // Every 30 seconds
