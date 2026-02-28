@@ -580,10 +580,13 @@ class ProfileEmbedder:
 
     @staticmethod
     def _has_paint_data_zip(source_3mf: Path) -> bool:
-        """Check if a 3MF file contains per-triangle paint_color data."""
+        """Check if a 3MF file contains per-triangle paint data.
+
+        Bambu uses ``paint_color``; PrusaSlicer uses ``mmu_segmentation``.
+        """
         MAX_SCAN = 32 * 1024 * 1024
         CHUNK = 1024 * 1024
-        needle = b"paint_color"
+        needles = (b"paint_color", b"mmu_segmentation")
         try:
             with zipfile.ZipFile(source_3mf, 'r') as zf:
                 for name in zf.namelist():
@@ -595,8 +598,9 @@ class ProfileEmbedder:
                             chunk = f.read(CHUNK)
                             if not chunk:
                                 break
-                            if needle in chunk:
-                                return True
+                            for needle in needles:
+                                if needle in chunk:
+                                    return True
                             scanned += len(chunk)
         except Exception:
             pass
@@ -784,17 +788,11 @@ class ProfileEmbedder:
             bed_single = [config['bed_temperature_initial_layer'][0]]
         config['bed_temperature_initial_layer_single'] = bed_single
 
-        # Painted files (per-triangle paint_color) require SEMM mode so Orca
-        # reads the paint data and generates per-face tool changes.  Non-painted
-        # multicolour files (per-object extruder assignments) don't need it.
-        has_paint = self._has_paint_data_zip(source_3mf)
-        if has_paint and target_slots > 1:
-            config['single_extruder_multi_material'] = '1'
-            # Ooze prevention is incompatible with SEMM + wipe tower
-            config['ooze_prevention'] = '0'
-            logger.info("Enabling SEMM mode for painted multicolour file")
-        else:
-            config['single_extruder_multi_material'] = '0'
+        # SEMM mode is handled by the pipeline path (build_slicer_config)
+        # which enables it when paint data is present and converted.
+        # The legacy path doesn't do mmu→paint_color conversion, so
+        # SEMM would have no effect here.
+        config['single_extruder_multi_material'] = '0'
 
         # Bambu configs use 'nil' for "use default".  Snapmaker OrcaSlicer
         # cannot parse 'nil' and segfaults at "Initializing StaticPrintConfigs".
@@ -838,6 +836,212 @@ class ProfileEmbedder:
         )
         return gcode
 
+    # ------------------------------------------------------------------
+    # Pipeline API: build_slicer_config + emit_threemf
+    # ------------------------------------------------------------------
+
+    def build_slicer_config(
+        self,
+        model: Any,  # ThreeMFModel from threemf_model.py
+        profiles: "ProfileSettings",
+        filament_settings: Dict[str, Any],
+        overrides: Dict[str, Any],
+        requested_filament_count: int = 1,
+        enable_flow_calibrate: bool = True,
+    ) -> Dict[str, Any]:
+        """Build a unified slicer config using the ThreeMFModel.
+
+        Replaces the separate preserve vs standard config paths.
+        The model carries all detection results (is_bambu, needs_preserve, etc.)
+        so no file-type branching is needed.
+        """
+        if model.needs_preserve and model.source_config:
+            # Start with source config, overlay Snapmaker hardware settings
+            config = copy.deepcopy(model.source_config)
+            config.update(copy.deepcopy(profiles.printer))
+            # Layer process + filament on top of hybrid base
+            config.update(copy.deepcopy(profiles.process))
+            config.update(copy.deepcopy(profiles.filament))
+        else:
+            # Full Snapmaker profile stack
+            config = copy.deepcopy({
+                **profiles.printer,
+                **profiles.process,
+                **profiles.filament,
+            })
+
+        # Always layer user settings on top
+        config.update(copy.deepcopy(filament_settings))
+        config.update(copy.deepcopy(overrides))
+
+        # Handle per-plate wipe tower arrays (Bambu)
+        if model.source_config:
+            self._preserve_bambu_wipe_tower_array_shape(config, model.source_config, overrides)
+
+        # Required settings
+        config['layer_gcode'] = 'G92 E0'
+        config.setdefault('enable_arc_fitting', '1')
+
+        # Override preset references
+        printer_name = profiles.printer.get('name', 'Snapmaker U1 (0.4 nozzle) - multiplate')
+        process_name = profiles.process.get('name', '0.20mm Standard @Snapmaker U1')
+        config['printer_settings_id'] = printer_name
+        config['print_settings_id'] = process_name
+        config['default_print_profile'] = process_name
+        config['print_compatible_printers'] = [printer_name]
+        config.pop('inherits', None)
+        config.pop('inherits_group', None)
+
+        # Strip foreign gcode
+        for key in ('time_lapse_gcode', 'machine_pause_gcode'):
+            config.pop(key, None)
+        fsg = config.get('filament_start_gcode')
+        if isinstance(fsg, list) and any('M142' in str(g) or 'air_filtration' in str(g) for g in fsg):
+            config.pop('filament_start_gcode', None)
+
+        # Sanitize index fields
+        self._sanitize_index_field(config, 'raft_first_layer_expansion', 0)
+        self._sanitize_index_field(config, 'tree_support_wall_count', 0)
+        self._sanitize_index_field(config, 'prime_volume', 0)
+        self._sanitize_index_field(config, 'prime_tower_brim_width', 0)
+        self._sanitize_index_field(config, 'prime_tower_brim_chamfer', 0)
+        self._sanitize_index_field(config, 'prime_tower_brim_chamfer_max_width', 0)
+        self._sanitize_index_field(config, 'solid_infill_filament', 1)
+        self._sanitize_index_field(config, 'sparse_infill_filament', 1)
+        self._sanitize_index_field(config, 'wall_filament', 1)
+
+        # Wipe tower clamping (only scalar, not per-plate arrays)
+        if model.source_config:
+            if not self._has_bambu_per_plate_wipe_tower_arrays(model.source_config):
+                self._sanitize_wipe_tower_position(config)
+        else:
+            self._sanitize_wipe_tower_position(config)
+
+        # Sanitize nil values
+        self._sanitize_nil_values(config)
+
+        # Compute target slots and pad arrays
+        assigned_count = model.assigned_extruder_count
+        target_slots = max(assigned_count, requested_filament_count, 1)
+
+        # Ensure required per-filament keys for multicolor
+        if target_slots > 1:
+            if 'filament_diameter' not in config:
+                config['filament_diameter'] = ['1.75']
+            if 'filament_is_support' not in config:
+                config['filament_is_support'] = ['0']
+
+        # List defaults for preserve path
+        if model.needs_preserve:
+            list_defaults = {
+                'filament_type': ['PLA'],
+                'filament_colour': ['#FFFFFF'],
+                'extruder_colour': ['#FFFFFF'],
+                'default_filament_profile': ['Snapmaker PLA'],
+                'filament_settings_id': ['Snapmaker PLA'],
+                'nozzle_temperature': ['210'],
+                'nozzle_temperature_initial_layer': ['210'],
+                'bed_temperature': ['60'],
+                'bed_temperature_initial_layer': ['60'],
+                'cool_plate_temp': ['60'],
+                'cool_plate_temp_initial_layer': ['60'],
+                'textured_plate_temp': ['60'],
+                'textured_plate_temp_initial_layer': ['60'],
+            }
+            for key, fallback in list_defaults.items():
+                values = self._ensure_list(config.get(key))
+                if not values:
+                    values = list(fallback)
+                config[key] = self._pad_list(values, target_slots, fallback[-1])
+
+            bed_single = self._ensure_list(config.get('bed_temperature_initial_layer_single'))
+            if not bed_single:
+                bed_single = [config['bed_temperature_initial_layer'][0]]
+            config['bed_temperature_initial_layer_single'] = bed_single
+
+        # Pad and normalize all arrays
+        if target_slots > 1:
+            self._pad_per_filament_arrays(config, target_slots)
+        fc = config.get('filament_colour')
+        final_slots = len(fc) if isinstance(fc, list) and fc else target_slots
+        self._normalize_per_filament_arrays(config, final_slots)
+
+        # SEMM mode for painted files
+        if model.has_paint_data and final_slots > 1:
+            config['single_extruder_multi_material'] = '1'
+            config['ooze_prevention'] = '0'
+        elif model.needs_preserve:
+            config['single_extruder_multi_material'] = '0'
+
+        # Flow calibrate
+        if not enable_flow_calibrate and 'machine_start_gcode' in config:
+            config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])
+
+        return config
+
+    def emit_threemf(
+        self,
+        model: Any,  # ThreeMFModel
+        config: Dict[str, Any],
+        output_3mf: Path,
+        extruder_remap: Dict[int, int] | None = None,
+        bambu_plate_id: Optional[int] = None,
+    ) -> Path:
+        """Write output 3MF with embedded config.
+
+        Uses model.needs_preserve to decide strategy:
+        - Preserve: Copy original ZIP, strip foreign metadata, inject config
+        - Rebuild: Trimesh rebuild + inject config
+        """
+        settings_json = json.dumps(config, indent=2)
+
+        if model.needs_preserve:
+            logger.info("Emitting 3MF with preserve path (keeping original structure)")
+            self._copy_and_inject_settings(
+                model.source_path,
+                output_3mf,
+                settings_json,
+                preserve_model_settings_from=None,
+                extruder_remap=extruder_remap,
+                model=model,
+            )
+        elif model.is_bambu:
+            logger.info("Emitting 3MF with trimesh rebuild (Bambu single-color)")
+            temp_clean = model.source_path.parent / f"{model.source_path.stem}_clean_{uuid.uuid4().hex[:8]}.3mf"
+            try:
+                self._rebuild_with_trimesh(model.source_path, temp_clean)
+                self._copy_and_inject_settings(
+                    temp_clean,
+                    output_3mf,
+                    settings_json,
+                    preserve_model_settings_from=None,
+                    extruder_remap=extruder_remap,
+                )
+            finally:
+                if temp_clean.exists():
+                    temp_clean.unlink()
+        else:
+            logger.info("Emitting 3MF with direct copy + inject")
+            self._copy_and_inject_settings(
+                model.source_path,
+                output_3mf,
+                settings_json,
+                preserve_model_settings_from=None,
+                extruder_remap=extruder_remap,
+            )
+
+        # Inject MultiAsSingle custom_gcode if Bambu trimesh path
+        if (model.is_bambu and model.has_layer_tool_changes
+                and not model.needs_preserve and bambu_plate_id is not None):
+            self._inject_custom_gcode(model.source_path, output_3mf, bambu_plate_id)
+
+        logger.info(f"Successfully emitted {output_3mf.name}")
+        return output_3mf
+
+    # ------------------------------------------------------------------
+    # Original embed_profiles — now delegates to pipeline when model given
+    # ------------------------------------------------------------------
+
     def embed_profiles(self,
                        source_3mf: Path,
                        output_3mf: Path,
@@ -850,67 +1054,72 @@ class ProfileEmbedder:
                        precomputed_has_multi_assignments: Optional[bool] = None,
                        precomputed_has_layer_changes: Optional[bool] = None,
                        enable_flow_calibrate: bool = True,
-                       bambu_plate_id: Optional[int] = None) -> Path:
+                       bambu_plate_id: Optional[int] = None,
+                       model: Optional[Any] = None) -> Path:
         """Copy original 3MF and inject Orca profiles.
 
-        Preserves all original geometry, transforms, and positioning.
-        Only adds/updates the Metadata/project_settings.config file.
-
-        For Bambu Studio files, extracts clean geometry with trimesh first.
-
-        Args:
-            source_3mf: Path to original 3MF file
-            output_3mf: Path where modified 3MF should be saved
-            filament_settings: Filament-specific settings (temps, speeds, etc.)
-            overrides: User-specified settings (layer_height, infill_density, etc.)
-
-        Returns:
-            Path to output 3MF file
-
-        Raises:
-            ProfileEmbedError: If embedding fails
+        If a ThreeMFModel is provided via `model`, uses the pipeline path
+        (build_slicer_config + emit_threemf). Otherwise falls back to the
+        legacy detection-based logic.
         """
+        # --- Pipeline path: use ThreeMFModel ---
+        if model is not None:
+            try:
+                profiles = self.load_snapmaker_profiles()
+                config = self.build_slicer_config(
+                    model=model,
+                    profiles=profiles,
+                    filament_settings=filament_settings,
+                    overrides=overrides,
+                    requested_filament_count=requested_filament_count,
+                    enable_flow_calibrate=enable_flow_calibrate,
+                )
+                return self.emit_threemf(
+                    model=model,
+                    config=config,
+                    output_3mf=output_3mf,
+                    extruder_remap=extruder_remap,
+                    bambu_plate_id=bambu_plate_id,
+                )
+            except Exception as e:
+                logger.error(f"Pipeline embed failed: {e}")
+                raise ProfileEmbedError(f"Profile embedding failed: {str(e)}") from e
+
+        # --- Legacy path: detection-based logic ---
         working_3mf = source_3mf
         try:
-            logger.info(f"Embedding profiles into {source_3mf.name}")
+            logger.info(f"Embedding profiles into {source_3mf.name} (legacy path)")
 
             profiles = self.load_snapmaker_profiles()
 
-            # Check if this is a Bambu file that needs rebuilding
-            # Use precomputed values when available (avoids redundant ZIP opens)
             preserve_model_settings_from = None
             is_bambu = precomputed_is_bambu if precomputed_is_bambu is not None else self._is_bambu_file(source_3mf)
             has_multi_assignments = precomputed_has_multi_assignments if precomputed_has_multi_assignments is not None else self._has_multi_extruder_assignments(source_3mf)
             has_layer_changes = precomputed_has_layer_changes if precomputed_has_layer_changes is not None else self._has_layer_tool_changes(source_3mf)
 
-            # Use assignment-preserving path for Bambu multicolor files that
-            # have actual per-object extruder assignments or per-triangle paint
-            # data.  The trimesh rebuild path strips these, producing a plain
-            # single-colour mesh.
-            #
-            # Use the assignment-preserving path for Bambu multicolor files:
-            # - Multi-extruder assignments: per-object/per-part extruder mapping
-            # - Layer tool changes (MultiAsSingle): mid-print filament swaps
-            # - Per-triangle paint data: SEMM mode needed
-            #
-            # The trimesh path can't be used for multi-plate Bambu files because
-            # it exports ALL objects from ALL plates with Bambu global coordinates
-            # (100s-1000s of mm from origin), causing segfaults or "Nothing to
-            # be sliced".  The flatten approach preserves plate structure.
             needs_preserve = has_multi_assignments or has_layer_changes
             if not needs_preserve and is_bambu and requested_filament_count > 1:
-                # Also check for per-triangle paint data (needs SEMM mode)
                 needs_preserve = self._has_paint_data_zip(source_3mf)
+            if not needs_preserve and is_bambu:
+                try:
+                    from multi_plate_parser import parse_multi_plate_3mf as _parse_mp
+                    _, is_multi = _parse_mp(source_3mf)
+                    if is_multi:
+                        needs_preserve = True
+                        logger.info("Bambu multi-plate file detected — using preserve path to keep plate structure")
+                except Exception:
+                    pass
 
             if is_bambu and needs_preserve:
                 reason = (
                     "layer-based tool changes" if has_layer_changes
                     else "model extruder assignments" if has_multi_assignments
-                    else "per-triangle paint data"
+                    else "per-triangle paint data" if (not has_multi_assignments and not has_layer_changes and requested_filament_count > 1)
+                    else "multi-plate structure"
                 )
                 logger.info(
-                    f"Detected Bambu multicolor file with {reason} - "
-                    "preserving extruder assignments"
+                    f"Detected Bambu file with {reason} - "
+                    "preserving original 3MF structure"
                 )
                 config = self._build_assignment_preserving_config(
                     source_3mf=source_3mf,
@@ -921,15 +1130,8 @@ class ProfileEmbedder:
                 )
                 if not enable_flow_calibrate and 'machine_start_gcode' in config:
                     config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])
-                    logger.info("Stripped SM_PRINT_FLOW_CALIBRATE blocks (flow calibration disabled)")
                 settings_json = json.dumps(config, indent=2)
 
-                # Pass original Bambu 3MF directly to OrcaSlicer.
-                # The --allow-newer-file flag lets Orca load Bambu format
-                # extensions (component assemblies, multi-file refs, plate
-                # definitions).  This preserves per-part extruder assignments
-                # for multicolor output.  Only the project_settings.config
-                # is replaced with our hybrid Bambu+Snapmaker config.
                 self._copy_and_inject_settings(
                     source_3mf,
                     output_3mf,
@@ -937,20 +1139,14 @@ class ProfileEmbedder:
                     preserve_model_settings_from=None,
                     extruder_remap=extruder_remap,
                 )
-
-                logger.info(f"Successfully embedded profiles into {output_3mf.name}")
                 return output_3mf
 
             if is_bambu:
-                # Bambu multi-file component references (p:path) crash Snapmaker
-                # OrcaSlicer v2.2.4 when combined with our Snapmaker settings.
-                # Always flatten via trimesh regardless of preserve_geometry.
                 logger.info("Detected Bambu Studio file - rebuilding with trimesh")
                 temp_clean = source_3mf.parent / f"{source_3mf.stem}_clean_{uuid.uuid4().hex[:8]}.3mf"
                 self._rebuild_with_trimesh(source_3mf, temp_clean)
                 working_3mf = temp_clean
 
-            # Merge all settings (deep copy to avoid mutating cached profiles)
             config = copy.deepcopy({
                 **profiles.printer,
                 **profiles.process,
@@ -959,17 +1155,11 @@ class ProfileEmbedder:
                 **overrides
             })
 
-            # Ensure layer_gcode for relative extruder addressing
             if 'layer_gcode' not in config:
                 config['layer_gcode'] = 'G92 E0'
-
-            # Ensure arc fitting to reduce G-code file size
             if 'enable_arc_fitting' not in config:
                 config['enable_arc_fitting'] = '1'
 
-            # Override preset references — OrcaSlicer looks these up in its
-            # system presets and segfaults when they don't exist.  Also strip
-            # 'inherits' which triggers system-preset lookups.
             printer_name = profiles.printer.get('name', 'Snapmaker U1 (0.4 nozzle) - multiplate')
             process_name = profiles.process.get('name', '0.20mm Standard @Snapmaker U1')
             config['printer_settings_id'] = printer_name
@@ -979,60 +1169,33 @@ class ProfileEmbedder:
             config.pop('inherits', None)
             config.pop('inherits_group', None)
 
-            # Strip Bambu-specific filament_start_gcode (from slicer_settings
-            # imported from Bambu profiles).  Bambu macros like M142 and
-            # activate_air_filtration are not understood by Snapmaker firmware.
             fsg = config.get('filament_start_gcode')
             if isinstance(fsg, list) and any('M142' in str(g) or 'air_filtration' in str(g) for g in fsg):
                 config.pop('filament_start_gcode', None)
-                logger.info("Stripped Bambu-specific filament_start_gcode")
 
-            # Strip time-lapse and pause gcode (Bambu-specific)
             for key in ('time_lapse_gcode', 'machine_pause_gcode'):
                 config.pop(key, None)
 
-            logger.debug(f"Merged config with {len(config)} keys")
-
-            # Sanitize 'nil' values from Bambu filament profiles (slicer_settings
-            # imported from Bambu profiles can carry 'nil' for "use default").
             self._sanitize_nil_values(config)
 
-            # Ensure required per-filament keys exist.  OrcaSlicer indexes
-            # these by filament number; if they're missing entirely when
-            # filament_colour indicates N>1 filaments, Orca reads uninitialised
-            # memory and segfaults at "Initializing StaticPrintConfigs".
-            # Our Snapmaker profiles omit these keys (they're implicit for
-            # single-filament), so inject sensible defaults before padding.
             if requested_filament_count > 1:
                 if 'filament_diameter' not in config:
                     config['filament_diameter'] = ['1.75']
                 if 'filament_is_support' not in config:
                     config['filament_is_support'] = ['0']
 
-            # Pad per-filament arrays to match requested_filament_count.
-            # Orca indexes per-filament arrays by filament number; if filament_colour
-            # indicates N filaments but other arrays are length 1, Orca reads past
-            # bounds and segfaults at "Initializing StaticPrintConfigs".
             if requested_filament_count > 1:
                 self._pad_per_filament_arrays(config, requested_filament_count)
 
-            # Normalize all per-filament arrays to the same length.
-            # Mixed array sizes (e.g. 2 from slicer_settings, 4 from padded
-            # temps) cause OrcaSlicer to read out of bounds and crash.
-            # Use filament_colour length as authoritative (determines slicer
-            # filament count), falling back to requested_filament_count.
             fc = config.get('filament_colour')
             target_slots = len(fc) if isinstance(fc, list) and fc else max(requested_filament_count, 1)
             self._normalize_per_filament_arrays(config, target_slots)
 
             if not enable_flow_calibrate and 'machine_start_gcode' in config:
                 config['machine_start_gcode'] = self._strip_flow_calibrate(config['machine_start_gcode'])
-                logger.info("Stripped SM_PRINT_FLOW_CALIBRATE blocks (flow calibration disabled)")
 
-            # Create JSON settings
             settings_json = json.dumps(config, indent=2)
 
-            # Copy and modify 3MF (use working_3mf which may be cleaned version)
             self._copy_and_inject_settings(
                 working_3mf,
                 output_3mf,
@@ -1041,23 +1204,15 @@ class ProfileEmbedder:
                 extruder_remap=extruder_remap,
             )
 
-            # For Bambu MultiAsSingle files that went through trimesh:
-            # inject the custom_gcode_per_layer.xml so OrcaSlicer emits the
-            # mid-print tool change.  The plate ID is remapped to 1 (trimesh
-            # creates a single-plate file).
             if is_bambu and has_layer_changes and not needs_preserve and bambu_plate_id is not None:
                 self._inject_custom_gcode(source_3mf, output_3mf, bambu_plate_id)
 
-            # Clean up temporary clean 3MF if we created one
             if working_3mf != source_3mf and working_3mf.exists():
                 working_3mf.unlink()
-                logger.debug(f"Cleaned up temporary file: {working_3mf.name}")
 
-            logger.info(f"Successfully embedded profiles into {output_3mf.name}")
             return output_3mf
 
         except Exception as e:
-            # Clean up temporary files on error
             temp_working = locals().get('working_3mf')
             if isinstance(temp_working, Path) and temp_working != source_3mf and temp_working.exists():
                 temp_working.unlink()
@@ -1247,6 +1402,7 @@ class ProfileEmbedder:
         settings_json: str,
         preserve_model_settings_from: Path | None = None,
         extruder_remap: Dict[int, int] | None = None,
+        model: Optional[Any] = None,
     ):
         """Copy 3MF and add/update project_settings.config.
 
@@ -1254,6 +1410,7 @@ class ProfileEmbedder:
             source: Source 3MF path
             dest: Destination 3MF path
             settings_json: JSON string to write to Metadata/project_settings.config
+            model: Optional ThreeMFModel for PrusaSlicer paint conversion
         """
         # Create temporary ZIP for rebuilding
         temp_zip = dest.with_suffix('.tmp')
@@ -1302,6 +1459,7 @@ class ProfileEmbedder:
                         logger.debug(f"Could not read source printable_area for recentering: {e}")
 
                 with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as dest_zf:
+                    has_model_settings = False
                     # Copy geometry and essential files, skip Bambu metadata
                     for item in source_zf.infolist():
                         if item.filename in drop_metadata_files:
@@ -1316,8 +1474,11 @@ class ProfileEmbedder:
                         # Copy file as-is (geometry, relations, etc.)
                         data = source_zf.read(item.filename)
                         if item.filename == 'Metadata/model_settings.config':
+                            has_model_settings = True
                             data = self._sanitize_model_settings(data, extruder_remap=extruder_remap)
                             data = self._recenter_assemble_items(data, recenter_dx, recenter_dy)
+                        if item.filename.endswith('.model'):
+                            data = self._convert_mmu_segmentation(data)
                         if item.filename == '3D/3dmodel.model':
                             data = self._recenter_build_items(data, recenter_dx, recenter_dy)
                         dest_zf.writestr(item, data)
@@ -1325,6 +1486,17 @@ class ProfileEmbedder:
                     # Add new project_settings.config
                     dest_zf.writestr('Metadata/project_settings.config', settings_json)
                     logger.debug("Injected new project_settings.config")
+
+                    # Generate model_settings.config for PrusaSlicer paint files.
+                    # OrcaSlicer needs extruder="0" per object to use paint_color
+                    # data from triangle attributes.
+                    if (not has_model_settings and model is not None
+                            and model.has_paint_data and model.objects):
+                        ms_xml = self._generate_paint_model_settings(model)
+                        if ms_xml:
+                            dest_zf.writestr('Metadata/model_settings.config', ms_xml)
+                            has_model_settings = True
+                            logger.info("Generated model_settings.config for PrusaSlicer paint conversion")
 
                     # Optionally preserve model_settings.config from original 3MF
                     if preserve_model_settings_from is not None and preserve_model_settings_from != source:
@@ -1346,6 +1518,72 @@ class ProfileEmbedder:
             if temp_zip.exists():
                 temp_zip.unlink()
             raise
+
+    @staticmethod
+    def _convert_mmu_segmentation(data: bytes) -> bytes:
+        """Rename PrusaSlicer ``slic3rpe:mmu_segmentation`` attributes to
+        ``paint_color`` so Snapmaker OrcaSlicer can read the per-triangle
+        paint data.  Also strips the slic3rpe namespace declaration.
+
+        The encoding values are byte-for-byte identical between the two
+        formats — only the attribute name differs.
+        """
+        if b"mmu_segmentation" not in data:
+            return data
+        logger.info("Converting PrusaSlicer mmu_segmentation → paint_color")
+        data = data.replace(
+            b"slic3rpe:mmu_segmentation=",
+            b"paint_color=",
+        )
+        # Strip the slic3rpe namespace declaration from <model> root element
+        # e.g. xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06"
+        data = re.sub(
+            rb'\s+xmlns:slic3rpe="[^"]*"',
+            b"",
+            data,
+            count=1,
+        )
+        return data
+
+    @staticmethod
+    def _generate_paint_model_settings(model) -> str:
+        """Generate a minimal ``model_settings.config`` for PrusaSlicer files
+        with per-triangle paint data.
+
+        Each object gets ``extruder="0"`` which tells OrcaSlicer to read
+        ``paint_color`` attributes from the triangle mesh.
+        """
+        from xml.sax.saxutils import escape as _xml_esc
+        lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<config>']
+        # Use a simple part_id counter (Orca expects unique IDs)
+        part_id = 1
+        for obj in model.objects.values():
+            if obj.obj_type != "model":
+                continue
+            safe_name = _xml_esc(obj.name, {'"': '&quot;'})
+            lines.append(f'  <object id="{obj.object_id}">')
+            lines.append(f'    <metadata key="name" value="{safe_name}"/>')
+            lines.append(f'    <metadata key="extruder" value="0"/>')
+            lines.append(f'    <part id="{part_id}" subtype="normal_part">')
+            lines.append(f'      <metadata key="name" value="{safe_name}"/>')
+            lines.append(f'      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>')
+            lines.append(f'    </part>')
+            lines.append(f'  </object>')
+            part_id += 1
+        # Add a single plate containing all objects
+        lines.append('  <plate>')
+        lines.append('    <metadata key="plater_id" value="1"/>')
+        lines.append('    <metadata key="plater_name" value=""/>')
+        for obj in model.objects.values():
+            if obj.obj_type != "model":
+                continue
+            lines.append(f'    <model_instance>')
+            lines.append(f'      <metadata key="object_id" value="{obj.object_id}"/>')
+            lines.append(f'      <metadata key="instance_id" value="0"/>')
+            lines.append(f'    </model_instance>')
+        lines.append('  </plate>')
+        lines.append('</config>')
+        return '\n'.join(lines)
 
     @staticmethod
     def _sanitize_model_settings(

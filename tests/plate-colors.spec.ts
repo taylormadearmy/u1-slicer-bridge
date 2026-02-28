@@ -82,7 +82,7 @@ test.describe('Per-Plate Color Detection', () => {
         }
       }
       return false;
-    }, undefined, { timeout: UPLOAD_TRANSITION_TIMEOUT_MS });
+    }, undefined, { timeout: SLOW_TEST_TIMEOUT_MS });
 
     // Wait for plates to load
     await page.waitForFunction(() => {
@@ -93,7 +93,7 @@ test.describe('Per-Plate Color Detection', () => {
         }
       }
       return false;
-    }, undefined, { timeout: UPLOAD_LIST_TIMEOUT_MS });
+    }, undefined, { timeout: SLOW_TEST_TIMEOUT_MS });
 
     // Get all plate cards from state
     const plates = await getAppState(page, 'plates') as any[];

@@ -2252,6 +2252,14 @@ function app() {
         proceedFromSelectPlate() {
             if (this.selectedUpload?.is_multi_plate && !this.selectedPlate) return;
             this.currentStep = 'configure';
+            // Explicitly trigger placement load — the IntersectionObserver may
+            // not fire reliably when the panel transitions from display:none.
+            this.placementPanelVisible = true;
+            this.queueObjectLayoutLoad(
+                this.selectedUpload?.upload_id,
+                this.selectedPlate,
+                50,  // tiny delay to let Alpine render the configure panel first
+            );
         },
 
         backToSelectPlate() {

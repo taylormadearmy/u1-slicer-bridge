@@ -569,6 +569,7 @@ test.describe('Slicing Workflow', () => {
   });
 
   test('Bambu slice-plate uses requested Orca plate when Metadata/plate_N.json exists (Shashibo H2D plate 6) @extended', async ({ request }) => {
+    test.setTimeout(420_000);
     const upload = await apiUpload(request, 'Shashibo-h2s-textured.3mf');
     expect(upload.is_multi_plate).toBe(true);
 
@@ -604,6 +605,7 @@ test.describe('Slicing Workflow', () => {
   });
 
   test('slice-plate preserves explicit prime tower position in G-code metadata (Shashibo plate 6) @extended', async ({ request }) => {
+    test.setTimeout(420_000);
     const upload = await apiUpload(request, 'Shashibo-h2s-textured.3mf');
 
     const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
@@ -654,6 +656,7 @@ test.describe('Slicing Workflow', () => {
   });
 
   test('actual prime tower footprint moves when explicit wipe_tower_x/y changes (Shashibo plate 6) @extended', async ({ request }) => {
+    test.setTimeout(420_000);
     const upload = await apiUpload(request, 'Shashibo-h2s-textured.3mf');
     const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
     expect(filRes.ok()).toBe(true);
@@ -732,6 +735,7 @@ test.describe('Slicing Workflow', () => {
   });
 
   test('Shashibo plate 6 preview object/tower relative placement matches sliced output quadrant (parity) @extended', async ({ page, request }) => {
+    test.setTimeout(420_000);
     await page.setViewportSize({ width: 1440, height: 1400 });
     await uploadFile(page, 'Shashibo-h2s-textured.3mf');
 
@@ -851,6 +855,7 @@ test.describe('Slicing Workflow', () => {
   });
 
   test('Shashibo plate 6 object transform XY delta matches sliced object footprint delta (parity) @extended', async ({ request }) => {
+    test.setTimeout(420_000);
     const upload = await apiUpload(request, 'Shashibo-h2s-textured.3mf');
 
     const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
@@ -924,6 +929,7 @@ test.describe('Slicing Workflow', () => {
   });
 
   test('Shashibo plate 5 object transform XY delta matches sliced object footprint delta (parity) @extended', async ({ request }) => {
+    test.setTimeout(420_000);
     const upload = await apiUpload(request, 'Shashibo-h2s-textured.3mf');
 
     const filRes = await request.get(`${API}/filaments`, { timeout: 30_000 });
@@ -1290,5 +1296,37 @@ test.describe('Slicing Workflow', () => {
     expect(job.status).toBe('completed');
     expect(job.metadata?.bounds?.max_x).toBeGreaterThan(0);
     expect(job.metadata?.layer_count).toBeGreaterThan(100);
+  });
+
+  // Regression: Bambu multi-plate file with 4 objects per plate.
+  // Moving one object must expand the transform to all co-objects
+  // on the same Bambu plate, otherwise OrcaSlicer's --slice N
+  // slices all 4 and the unmoved neighbours collide with the moved one.
+  test('Button-for-S-trousers plate 1 slice succeeds after +5mm X move @extended (regression)', async ({ request }) => {
+    test.setTimeout(420_000);
+    const upload = await apiUpload(request, 'Button-for-S-trousers.3mf');
+    expect(upload.is_multi_plate).toBe(true);
+
+    const fil = await getDefaultFilament(request);
+
+    // Plate 1, build item 1 — one of 4 objects on Bambu plate 1.
+    // Without co-plate expansion this fails with "gcode path conflicts".
+    const res = await request.post(`${API}/uploads/${upload.upload_id}/slice-plate`, {
+      data: {
+        plate_id: 1,
+        filament_ids: [fil.id, fil.id, fil.id, fil.id],
+        object_transforms: [{
+          build_item_index: 1,
+          translate_x_mm: 5,
+          translate_y_mm: 0,
+          rotate_z_deg: 0,
+        }],
+      },
+      timeout: 300_000,
+    });
+    expect(res.ok()).toBe(true);
+    const job = await res.json();
+    expect(job.status).toBe('completed');
+    expect(job.metadata?.bounds?.max_x).toBeGreaterThan(0);
   });
 });

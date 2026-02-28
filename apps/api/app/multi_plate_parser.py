@@ -525,6 +525,7 @@ def _collect_object_mesh_geometry(
 def list_build_item_geometry_3mf(
     file_path: Path,
     plate_id: Optional[int] = None,
+    plate_ids: Optional[List[int]] = None,
     build_item_index: Optional[int] = None,
     max_triangles_per_object: int = 20000,
     include_modifiers: bool = True,
@@ -601,7 +602,12 @@ def list_build_item_geometry_3mf(
             if build_item_index is not None and (build_item_index < 1 or build_item_index > len(items)):
                 raise ValueError(f"Build item {build_item_index} not found (file has {len(items)} items)")
 
-            target_indices = [plate_id] if plate_id is not None else list(range(1, len(items) + 1))
+            if plate_ids is not None:
+                target_indices = [pid for pid in plate_ids if 1 <= pid <= len(items)]
+            elif plate_id is not None:
+                target_indices = [plate_id]
+            else:
+                target_indices = list(range(1, len(items) + 1))
             if build_item_index is not None:
                 if build_item_index not in target_indices:
                     raise ValueError(
