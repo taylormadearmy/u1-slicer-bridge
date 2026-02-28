@@ -401,8 +401,21 @@
                         </template>
                     </div>
 
+                    <!-- Loading indicator while plates/details are still loading -->
+                    <template x-if="platesLoading">
+                        <div class="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                            <div class="flex justify-between text-sm mb-1">
+                                <span class="text-blue-700">Loading file details...</span>
+                                <span class="text-blue-700">Processing</span>
+                            </div>
+                            <div class="w-full bg-blue-100 rounded-full h-2 overflow-hidden">
+                                <div class="h-2 w-1/3 bg-blue-500 rounded-full animate-pulse"></div>
+                            </div>
+                        </div>
+                    </template>
+
                     <!-- Slice Button (top of configure) -->
-                    <div class="mb-4">
+                    <div class="mb-4" x-show="!platesLoading">
                         <button @click="startSlice()"
                                 :disabled="!selectedFilament && (!selectedFilaments || selectedFilaments.length === 0)"
                                 :class="(selectedFilament || (selectedFilaments && selectedFilaments.length > 0)) ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'"

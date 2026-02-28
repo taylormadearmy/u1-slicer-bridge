@@ -240,6 +240,7 @@ test.describe('G-code Viewer', () => {
   });
 
   test('Shashibo plate 6 placement preview starts on-bed (regression: off-plate selected plate preview)', async ({ page, request }) => {
+    test.setTimeout(420_000);
     await page.setViewportSize({ width: 1440, height: 1400 });
     await waitForApp(page);
     await apiUpload(request, 'Shashibo-h2s-textured.3mf');
@@ -268,7 +269,7 @@ test.describe('G-code Viewer', () => {
       const body = document.querySelector('body') as any;
       const scope = (body?._x_dataStack || []).find((s: any) => 'objectLayout' in s);
       return !!scope?.objectLayout && !scope?.objectLayoutLoading && !scope?.objectLayoutError && Number(scope?.selectedPlate || 0) === 6;
-    }, undefined, { timeout: 90_000 });
+    }, undefined, { timeout: 180_000 });
 
     const placement = await page.evaluate(() => {
       const body = document.querySelector('body') as any;

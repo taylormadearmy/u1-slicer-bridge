@@ -241,15 +241,15 @@ def detect_layer_tool_changes(file_path: Path) -> Dict[int, List[Dict[str, Any]]
 
 
 def _has_paint_data(zf: zipfile.ZipFile) -> bool:
-    """Check whether any .model file in the archive contains paint_color attributes.
+    """Check whether any .model file in the archive contains paint data.
 
-    Scans model files in chunks.  Paint data lives on ``<triangle>`` elements
-    which appear *after* ``<vertices>`` — so for large meshes the marker can be
-    several MB into the file.  We cap the scan at 32 MB per file to stay fast.
+    Bambu uses ``paint_color`` attributes; PrusaSlicer uses
+    ``mmu_segmentation`` attributes on ``<triangle>`` elements.
+    Scans in chunks, capped at 32 MB per file.
     """
     MAX_SCAN = 32 * 1024 * 1024  # 32 MB
     CHUNK = 1024 * 1024          # 1 MB reads
-    needle = b"paint_color"
+    needles = (b"paint_color", b"mmu_segmentation")
     for name in zf.namelist():
         if not name.endswith(".model"):
             continue
@@ -260,8 +260,9 @@ def _has_paint_data(zf: zipfile.ZipFile) -> bool:
                     chunk = f.read(CHUNK)
                     if not chunk:
                         break
-                    if needle in chunk:
-                        return True
+                    for needle in needles:
+                        if needle in chunk:
+                            return True
                     scanned += len(chunk)
         except Exception:
             continue
@@ -318,9 +319,8 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
                 settings = json.loads(settings_data)
 
                 # Detect painted multicolor files.  These use per-triangle
-                # paint_color attributes with multiple filament colours.
-                # Some exports set single_extruder_multi_material=1, others
-                # leave it at 0 — so we detect based on actual paint data.
+                # paint_color / mmu_segmentation attributes.  During slicing,
+                # mmu_segmentation is converted to paint_color for OrcaSlicer.
                 filament_colors = settings.get("filament_colour", [])
 
                 if isinstance(filament_colors, list) and len(filament_colors) > 1:
@@ -377,7 +377,49 @@ def detect_colors_from_3mf(file_path: Path) -> List[str]:
                             
             except (KeyError, ValueError):
                 pass
-            
+
+            # Try PrusaSlicer format: check Slic3r_PE_model.config for
+            # per-object extruder assignments, then map to extruder_colour
+            # from Slic3r_PE.config.  extruder_colour alone is just the
+            # printer's tool-head colours (not per-model assignments).
+            try:
+                pe_extruder_colours: List[str] = []
+                pe_data = zf.read("Metadata/Slic3r_PE.config").decode("utf-8", errors="replace")
+                for line in pe_data.splitlines():
+                    stripped = line.lstrip("; ").strip()
+                    if stripped.startswith("extruder_colour"):
+                        _, _, value = stripped.partition("=")
+                        value = value.strip()
+                        if value:
+                            pe_extruder_colours = [c.strip() for c in value.split(";") if c.strip()]
+                        break
+
+                # Check for paint data (mmu_segmentation) or per-object
+                # extruder assignments — either makes the file multicolor.
+                # During slicing, mmu_segmentation is converted to paint_color.
+                if pe_extruder_colours:
+                    if _has_paint_data(zf):
+                        return pe_extruder_colours
+
+                    try:
+                        model_cfg = zf.read("Metadata/Slic3r_PE_model.config").decode("utf-8", errors="replace")
+                        model_cfg_root = ET.fromstring(model_cfg)
+                        assigned_extruders: set = set()
+                        for meta in model_cfg_root.findall('.//metadata'):
+                            if meta.get('key') == 'extruder' and meta.get('type') == 'object':
+                                raw = (meta.get('value') or '').strip()
+                                if raw:
+                                    try:
+                                        assigned_extruders.add(int(raw))
+                                    except ValueError:
+                                        pass
+                        if len(assigned_extruders) > 1:
+                            return _extruders_to_colors(assigned_extruders, pe_extruder_colours)
+                    except (KeyError, ET.ParseError):
+                        pass
+            except KeyError:
+                pass
+
             # Try to read from model metadata
             try:
                 model_xml = zf.read("3D/3dmodel.model")

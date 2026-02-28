@@ -29,7 +29,8 @@ from multi_plate_parser import (
     _apply_affine_to_bounds_3x4,
 )
 from plate_validator import PlateValidator
-from parser_3mf import detect_colors_from_3mf, detect_colors_per_plate, detect_print_settings, extract_3mf_metadata_batch
+from parser_3mf import detect_colors_from_3mf, detect_colors_per_plate, detect_print_settings
+from threemf_model import parse_threemf, apply_user_moves
 from scale_3mf import apply_uniform_scale_to_3mf, apply_layout_scale_to_3mf
 from transform_3mf import apply_object_transforms_to_3mf
 
@@ -86,6 +87,87 @@ def _get_bambu_plate_for_object(source_3mf: Path, object_id: str) -> Optional[in
     except Exception as e:
         logger.warning(f"Could not look up Bambu plate for object {object_id}: {e}")
     return None
+
+
+def _get_bambu_plate_object_ids(source_3mf: Path, plater_id: int) -> List[str]:
+    """Return all object_ids assigned to the given Bambu plater_id.
+
+    Used to expand a single-object transform to all co-objects on the same
+    Bambu plate so they move as a group and don't collide.
+    """
+    result: List[str] = []
+    try:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(source_3mf, 'r') as zf:
+            if 'Metadata/model_settings.config' not in zf.namelist():
+                return result
+            root = ET.fromstring(zf.read('Metadata/model_settings.config'))
+            for plate in root.findall('.//plate'):
+                pid = None
+                for meta in plate.findall('metadata'):
+                    if meta.get('key') == 'plater_id':
+                        pid = meta.get('value')
+                if pid is not None and int(pid) == plater_id:
+                    for mi in plate.findall('model_instance'):
+                        for m in mi.findall('metadata'):
+                            if m.get('key') == 'object_id':
+                                result.append(str(m.get('value')))
+    except Exception as e:
+        logger.warning(f"Could not get Bambu plate {plater_id} objects: {e}")
+    return result
+
+
+def _get_bambu_co_plate_indices(source_3mf: Path, plate_id: int) -> Optional[List[int]]:
+    """Return all build_item indices sharing the same Bambu plate as `plate_id`.
+
+    Returns None if not a Bambu file or no model_settings.config found.
+    Returns a list of 1-based build_item indices (including `plate_id` itself).
+    """
+    try:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(source_3mf, 'r') as zf:
+            if 'Metadata/model_settings.config' not in zf.namelist():
+                return None
+            # Build object_id → build_item_index map from build section
+            model_xml = zf.read('3D/3dmodel.model')
+            model_root = ET.fromstring(model_xml)
+            ns_3mf = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+            build = model_root.find(f"{{{ns_3mf}}}build")
+            if build is None:
+                return None
+            oid_to_idx: Dict[str, int] = {}
+            items = build.findall(f"{{{ns_3mf}}}item")
+            if plate_id < 1 or plate_id > len(items):
+                return None
+            for i, item in enumerate(items, start=1):
+                oid = item.get("objectid")
+                if oid:
+                    oid_to_idx[oid] = i
+
+            # Find the object_id for the requested plate_id
+            target_item = items[plate_id - 1]
+            target_oid = target_item.get("objectid")
+            if not target_oid:
+                return None
+
+            # Find which Bambu plate contains this object
+            bambu_pid = _get_bambu_plate_for_object(source_3mf, target_oid)
+            if bambu_pid is None:
+                return None
+
+            # Get all objects on that Bambu plate
+            co_oids = _get_bambu_plate_object_ids(source_3mf, bambu_pid)
+            if len(co_oids) <= 1:
+                return None  # Single object — no expansion needed
+
+            # Map back to build item indices
+            co_indices = sorted(
+                oid_to_idx[oid] for oid in co_oids if oid in oid_to_idx
+            )
+            return co_indices if len(co_indices) > 1 else None
+    except Exception as e:
+        logger.warning(f"Could not expand Bambu co-plate indices for plate {plate_id}: {e}")
+        return None
 
 
 def _is_wipe_tower_conflict(result: Dict[str, object]) -> bool:
@@ -315,16 +397,24 @@ def _enforce_transformed_bounds_or_raise(
 
     def _fully_inside(it: Dict[str, object]) -> bool:
         wb = it.get("world_bounds") or {}
+
+        # First check: world_bounds directly (correct for recentered/bed-local files).
+        # After embed_profiles + recentering, build-item world_bounds are authoritative.
+        # Check these BEFORE assemble transforms, which may be in a different coordinate
+        # space (Bambu assemble coords) and not updated by recentering.
+        if _check_wb_in_volume(wb):
+            return True
+
+        # world_bounds failed — they may be in packed Bambu coordinates.
+        # Try assemble transforms as an alternative coordinate source, but only
+        # when the assemble transform itself is in packed space (XY >> bed_size).
+        # Normal-range assemble transforms (XY within bed) often have stale Z=0
+        # and would produce incorrect Z bounds that falsely reject valid positions.
         local_bounds = it.get("local_bounds") or {}
         idx = int(it.get("build_item_index") or 0)
         oid = str(it.get("object_id") or "")
         t3 = assemble_transforms_by_object.get(oid) or assemble_transforms.get(idx)
         if t3 and isinstance(local_bounds, dict):
-            # Check if the assemble transform uses "normal" coordinates
-            # (bed-local [0, bed_size] or bed-center [-bed/2, bed/2]).
-            # Normal-range transforms often have stale Z=0 and shouldn't
-            # override world_bounds from the build item (which has correct Z).
-            # Only Bambu packed coordinates (XY >> bed_size) should override.
             t3_normal_range = False
             try:
                 t3x, t3y = float(t3[9]), float(t3[10])
@@ -335,23 +425,31 @@ def _enforce_transformed_bounds_or_raise(
             if not t3_normal_range:
                 wb_from_assemble = _bounds_from_local_and_transform(it, t3)
                 if wb_from_assemble:
+                    if _check_wb_in_volume(wb_from_assemble):
+                        return True
                     wb = wb_from_assemble
-
-        # First check: world_bounds directly (correct for recentered/bed-local files).
-        if _check_wb_in_volume(wb):
-            return True
 
         # Fallback: apply the assemble-derived display offset. This handles packed
         # Bambu coordinates where world_bounds aren't in bed-local space.
+        # Only apply when bounds center is clearly in packed coordinate space
+        # (far from the bed region).  After bed recentering + user transforms,
+        # coordinates are bed-local and the offset must NOT mask off-bed positions.
         if assemble_preview_offset_xy:
             ox, oy = assemble_preview_offset_xy
             try:
-                wb_offset = {
-                    "min": [float(wb["min"][0]) + ox, float(wb["min"][1]) + oy, float(wb["min"][2])],
-                    "max": [float(wb["max"][0]) + ox, float(wb["max"][1]) + oy, float(wb["max"][2])],
-                }
-                if _check_wb_in_volume(wb_offset):
-                    return True
+                wb_cx = (float(wb["min"][0]) + float(wb["max"][0])) / 2.0
+                wb_cy = (float(wb["min"][1]) + float(wb["max"][1])) / 2.0
+                bounds_are_bed_local = (
+                    -vol_x * 0.5 < wb_cx < vol_x * 1.5
+                    and -vol_y * 0.5 < wb_cy < vol_y * 1.5
+                )
+                if not bounds_are_bed_local:
+                    wb_offset = {
+                        "min": [float(wb["min"][0]) + ox, float(wb["min"][1]) + oy, float(wb["min"][2])],
+                        "max": [float(wb["max"][0]) + ox, float(wb["max"][1]) + oy, float(wb["max"][2])],
+                    }
+                    if _check_wb_in_volume(wb_offset):
+                        return True
             except Exception:
                 pass
         return False
@@ -739,6 +837,16 @@ def _apply_layout_bambu_plate_translation_offset_mapping(
         if pt:
             frame["plate_translation_mm"] = [round(pt[0], 6), round(pt[1], 6), round(pt[2], 6)]
 
+    # For co-plate groups (multiple items sharing a Bambu plate), use the
+    # group center as the shared offset so relative positions are preserved.
+    # For single items, each item's own translation is fine (maps to center).
+    if len(items) > 1 and allow_object_edit:
+        group_pts = [plate_translations[int(it.get("build_item_index") or 0)] for it in items]
+        shared_ptx = sum(pt[0] for pt in group_pts) / len(group_pts)
+        shared_pty = sum(pt[1] for pt in group_pts) / len(group_pts)
+    else:
+        shared_ptx = shared_pty = None
+
     for it in items:
         idx = int(it.get("build_item_index") or 0)
         ptx, pty, _ = plate_translations[idx]
@@ -749,8 +857,11 @@ def _apply_layout_bambu_plate_translation_offset_mapping(
         x = float(core_t[0] or 0)
         y = float(core_t[1] or 0)
         z = float(core_t[2] if len(core_t) >= 3 else 0)
-        ux = (x - float(ptx)) + bed_cx
-        uy = (y - float(pty)) + bed_cy
+        # For co-plate groups, use the shared group center offset
+        ref_ptx = shared_ptx if shared_ptx is not None else float(ptx)
+        ref_pty = shared_pty if shared_pty is not None else float(pty)
+        ux = (x - ref_ptx) + bed_cx
+        uy = (y - ref_pty) + bed_cy
         it["ui_base_pose"] = {"x": ux, "y": uy, "z": z, "rotate_z_deg": 0.0}
     return frame
 
@@ -851,6 +962,7 @@ def _derive_layout_placement_frame(
     bed_x: float,
     bed_y: float,
     validation_bounds: Optional[Dict[str, object]],
+    bambu_co_plate_expanded: bool = False,
 ) -> Dict[str, object]:
     """Return canonical (bed-local) placement frame metadata + per-item ui pose hints.
 
@@ -887,7 +999,9 @@ def _derive_layout_placement_frame(
     )
     plate_translations = _read_multi_plate_translations_by_id(source_3mf)
     if plate_translations:
-        can_exact_selected_plate = bool(plate_id is not None and len(items) == 1)
+        can_exact_selected_plate = bool(
+            plate_id is not None and (len(items) == 1 or bambu_co_plate_expanded)
+        )
         mapped = _apply_layout_bambu_plate_translation_offset_mapping(
             frame,
             items,
@@ -983,32 +1097,6 @@ def _index_preview_assets(source_3mf: Path) -> Dict[str, object]:
         "by_plate": preview_map,
         "best": best_preview,
     }
-
-
-def _index_plate_previews(source_3mf: Path) -> Dict[int, str]:
-    assets = _index_preview_assets(source_3mf)
-    by_plate = assets.get("by_plate")
-    if isinstance(by_plate, dict):
-        return by_plate
-    return {}
-
-
-def _index_bambu_plate_json_ids(source_3mf: Path) -> set[int]:
-    """Return Bambu/Orca plate IDs present as Metadata/plate_N.json in a 3MF."""
-    ids: set[int] = set()
-    try:
-        with zipfile.ZipFile(source_3mf, "r") as zf:
-            for name in zf.namelist():
-                m = re.search(r"(?:^|/)Metadata/plate_(\d+)\.json$", name, re.IGNORECASE)
-                if not m:
-                    continue
-                try:
-                    ids.add(int(m.group(1)))
-                except ValueError:
-                    continue
-    except Exception:
-        return set()
-    return ids
 
 
 def _guess_image_media_type(filename: str) -> str:
@@ -1279,9 +1367,9 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             except Exception as e:
                 job_logger.warning(f"Could not detect colors from 3MF: {e}")
 
-        # Single-pass metadata extraction (avoids multiple ZIP opens)
-        file_meta = extract_3mf_metadata_batch(source_3mf)
-        active_extruders = file_meta["active_extruders"]
+        # Parse 3MF model once — single source of truth for all detection
+        model = await asyncio.to_thread(parse_threemf, source_3mf)
+        active_extruders = model.active_extruders
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
 
@@ -1442,8 +1530,8 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             overrides["skirt_distance"] = str(request.skirt_distance)
         if request.skirt_height is not None:
             overrides["skirt_height"] = str(request.skirt_height)
-        # Auto-enable prime tower for multi-color copies: without it, the slicer
-        # dumps purge/wipe material around the objects creating visible artifacts.
+        # Auto-enable prime tower for multi-color copies.
+        # Paint data files get SEMM + prime tower via build_slicer_config.
         need_prime_tower = request.enable_prime_tower
         if copies_count > 1 and extruder_count > 1 and not need_prime_tower:
             need_prime_tower = True
@@ -1482,10 +1570,11 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 requested_filament_count=extruder_count,
                 extruder_remap=extruder_remap if has_overflow_extruders else None,
                 preserve_geometry=True,
-                precomputed_is_bambu=file_meta["is_bambu"],
-                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
-                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                precomputed_is_bambu=model.is_bambu,
+                precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
+                precomputed_has_layer_changes=model.has_layer_tool_changes,
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
+                model=model,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -1632,10 +1721,11 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 requested_filament_count=extruder_count,
                 extruder_remap=extruder_remap if has_overflow_extruders else None,
                 preserve_geometry=True,
-                precomputed_is_bambu=file_meta["is_bambu"],
-                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
-                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                precomputed_is_bambu=model.is_bambu,
+                precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
+                precomputed_has_layer_changes=model.has_layer_tool_changes,
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
+                model=model,
             )
             embedded_retry = await _apply_object_transforms_if_needed(
                 embedded_retry,
@@ -1984,32 +2074,32 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             except Exception as e:
                 job_logger.warning(f"Could not detect colors from 3MF: {e}")
 
-        plates, is_multi_plate = parse_multi_plate_3mf(source_3mf)
-        if not is_multi_plate:
+        # Parse 3MF model once — single source of truth for plates, detection, etc.
+        model = await asyncio.to_thread(parse_threemf, source_3mf)
+        if not model.is_multi_plate:
             job_logger.error(f"Upload {upload_id} is not a multi-plate file")
             raise HTTPException(status_code=400, detail="Not a multi-plate file - use /uploads/{id}/slice instead")
 
-        # Validate requested plate exists
-        target_plate = None
-        for plate in plates:
-            if plate.plate_id == request.plate_id:
-                target_plate = plate
-                break
-
+        # Validate requested plate exists.
+        # UI sends build-item indices (from parse_multi_plate_3mf); for Bambu files
+        # these differ from logical plater_ids, so map via item_to_plate first.
+        target_plate = model.get_plate_for_item(request.plate_id) or model.get_plate(request.plate_id)
         if not target_plate:
             job_logger.error(f"Plate {request.plate_id} not found in file")
             raise HTTPException(status_code=404, detail=f"Plate {request.plate_id} not found")
 
-        if not target_plate.printable:
+        # Check if first item on plate is non-printable
+        if target_plate.items and not target_plate.items[0].printable:
             job_logger.warning(f"Plate {request.plate_id} is marked as non-printable")
 
-        job_logger.info(f"Found plate {request.plate_id}: Object {target_plate.object_id}")
+        target_object_id = target_plate.items[0].object_id if target_plate.items else "?"
+        job_logger.info(f"Found plate {request.plate_id}: Object {target_object_id}")
 
         # Get filament IDs (supports both single and array)
         filament_ids = get_filament_ids(request)
         if len(filament_ids) > 4:
             raise HTTPException(status_code=400, detail="U1 supports at most 4 extruders (max 4 filament_ids).")
-        
+
         # Validate all filaments exist and fetch their settings
         filament_rows = await conn.fetch(
             """
@@ -2033,9 +2123,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         # Preserve request order and allow duplicate filament IDs
         filaments = [filament_by_id[fid] for fid in filament_ids]
 
-        # Single-pass metadata extraction (avoids multiple ZIP opens)
-        file_meta = extract_3mf_metadata_batch(source_3mf)
-        active_extruders = file_meta["active_extruders"]
+        active_extruders = model.active_extruders
         if active_extruders:
             job_logger.info(f"Active assigned extruders: {active_extruders}")
 
@@ -2204,8 +2292,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["skirt_distance"] = str(request.skirt_distance)
         if request.skirt_height is not None:
             overrides["skirt_height"] = str(request.skirt_height)
-        # Auto-enable prime tower for multi-color copies: without it, the slicer
-        # dumps purge/wipe material around the objects creating visible artifacts.
+        # Auto-enable prime tower for multi-color copies.
+        # Paint data files get SEMM + prime tower via build_slicer_config.
         need_prime_tower = request.enable_prime_tower
         if copies_count > 1 and extruder_count > 1 and not need_prime_tower:
             need_prime_tower = True
@@ -2233,25 +2321,15 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             overrides["machine_load_filament_time"] = "0"
             overrides["machine_unload_filament_time"] = "0"
 
-        # Compute Bambu plate ID before embed_profiles so we can pass it for
-        # MultiAsSingle custom_gcode injection.
-        bambu_plate = None
-        if file_meta["is_bambu"]:
-            bambu_plate = _get_bambu_plate_for_object(source_3mf, str(target_plate.object_id))
-            if bambu_plate is not None:
-                if bambu_plate != request.plate_id:
-                    job_logger.info(
-                        f"Bambu file — mapping plate {request.plate_id} "
-                        f"(object {target_plate.object_id}) to Orca plate "
-                        f"{bambu_plate} (Bambu plater_id)"
-                    )
-            else:
-                # Fallback for Bambu files without plater_id metadata
-                bambu_plate = 1
-                job_logger.info(
-                    f"Bambu file — no plater_id found for object "
-                    f"{target_plate.object_id}, falling back to Orca plate 1"
-                )
+        # The model's plate_id already maps to the Bambu plater_id (set during parse).
+        # No separate lookup needed — target_plate.plate_id IS the effective plate ID.
+        bambu_plate = target_plate.plate_id if model.is_bambu else None
+        if model.is_bambu and bambu_plate != request.plate_id:
+            job_logger.info(
+                f"Bambu file — mapping plate {request.plate_id} "
+                f"(object {target_object_id}) to Orca plate "
+                f"{bambu_plate} (Bambu plater_id)"
+            )
 
         try:
             await embedder.embed_profiles_async(
@@ -2261,11 +2339,12 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 overrides=overrides,
                 requested_filament_count=extruder_count,
                 extruder_remap=extruder_remap if has_overflow_extruders else None,
-                precomputed_is_bambu=file_meta["is_bambu"],
-                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
-                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                precomputed_is_bambu=model.is_bambu,
+                precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
+                precomputed_has_layer_changes=model.has_layer_tool_changes,
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
                 bambu_plate_id=bambu_plate,
+                model=model,
             )
             three_mf_size_mb = embedded_3mf.stat().st_size / 1024 / 1024
             job_logger.info(f"Profile-embedded 3MF created: {embedded_3mf.name} ({three_mf_size_mb:.2f} MB)")
@@ -2273,13 +2352,23 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"Failed to embed profiles: {str(e)}")
             raise SlicingError(f"Profile embedding failed: {str(e)}")
 
+        # Expand user transforms to co-plate items via model (auto Bambu-aware).
+        effective_transforms = request.object_transforms
+        if effective_transforms:
+            effective_transforms = apply_user_moves(model, effective_transforms)
+            if len(effective_transforms) != len(request.object_transforms):
+                job_logger.info(
+                    f"Expanded {len(request.object_transforms)} transform(s) to "
+                    f"{len(effective_transforms)} (co-plate items)"
+                )
+
         embedded_3mf = await _apply_object_transforms_if_needed(
             embedded_3mf,
             workspace,
-            request.object_transforms,
+            effective_transforms,
             job_logger,
         )
-        if request.object_transforms:
+        if effective_transforms:
             _enforce_transformed_bounds_or_raise(
                 embedded_3mf,
                 printer_profile,
@@ -2301,13 +2390,11 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             mapped = 20 + int(pct * 0.65)
             _update_progress(job_id, mapped, msg)
 
-        # For Bambu files, use the actual Bambu plater_id so OrcaSlicer
-        # slices the correct plate from the original (unmodified) 3MF.
-        effective_plate_id = request.plate_id
-        if file_meta["is_bambu"] and bambu_plate is not None:
-            effective_plate_id = bambu_plate
+        # The model's plate_id already maps to the correct Orca plate.
+        effective_plate_id = target_plate.plate_id
+        if effective_plate_id != request.plate_id:
             job_logger.info(
-                f"Bambu file — using Orca plate {bambu_plate} "
+                f"Bambu file — using Orca plate {effective_plate_id} "
                 f"(mapped from user plate {request.plate_id})"
             )
 
@@ -2384,19 +2471,20 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 requested_filament_count=extruder_count,
                 extruder_remap=extruder_remap if has_overflow_extruders else None,
                 preserve_geometry=True,
-                precomputed_is_bambu=file_meta["is_bambu"],
-                precomputed_has_multi_assignments=file_meta["has_multi_extruder_assignments"],
-                precomputed_has_layer_changes=file_meta["has_layer_tool_changes"],
+                precomputed_is_bambu=model.is_bambu,
+                precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
+                precomputed_has_layer_changes=model.has_layer_tool_changes,
                 enable_flow_calibrate=request.enable_flow_calibrate if request.enable_flow_calibrate is not None else True,
+                model=model,
             )
             embedded_retry = await _apply_object_transforms_if_needed(
                 embedded_retry,
                 workspace,
-                request.object_transforms,
+                effective_transforms,
                 job_logger,
                 suffix="no_prime",
             )
-            if request.object_transforms:
+            if effective_transforms:
                 _enforce_transformed_bounds_or_raise(
                     embedded_retry,
                     printer_profile,
@@ -2801,7 +2889,21 @@ async def get_upload_layout(upload_id: int, plate_id: Optional[int] = Query(None
     started = time.perf_counter()
 
     def _compute_layout():
-        items = list_build_items_3mf(source_3mf, plate_id=plate_id)
+        # For Bambu files, expand to all co-objects on the same Bambu plate
+        # so the placement viewer shows the full plate group, not just one item.
+        effective_plate_ids = None
+        if plate_id is not None:
+            co_indices = _get_bambu_co_plate_indices(source_3mf, plate_id)
+            if co_indices:
+                effective_plate_ids = co_indices
+
+        if effective_plate_ids:
+            # Fetch all items and filter to the co-plate set
+            all_items = list_build_items_3mf(source_3mf, plate_id=None)
+            items = [it for it in all_items if int(it.get("build_item_index", 0)) in effective_plate_ids]
+        else:
+            items = list_build_items_3mf(source_3mf, plate_id=plate_id)
+
         printer_profile = get_printer_profile("snapmaker_u1")
         validator = PlateValidator(printer_profile)
         validation = validator.validate_3mf_bounds(source_3mf, plate_id=plate_id)
@@ -2814,6 +2916,7 @@ async def get_upload_layout(upload_id: int, plate_id: Optional[int] = Query(None
             bed_x=float(printer_profile.build_volume_x),
             bed_y=float(printer_profile.build_volume_y),
             validation_bounds=bounds if isinstance(bounds, dict) else None,
+            bambu_co_plate_expanded=bool(effective_plate_ids),
         )
         return items, printer_profile, validation, bounds, placement_frame
 
@@ -2883,11 +2986,20 @@ async def get_upload_geometry(
     elif lod_key in ("full",):
         max_triangles = 50000
 
+    # For Bambu files, expand to all co-objects on the same Bambu plate
+    # so the placement viewer shows the full plate group geometry.
+    effective_plate_ids = None
+    if plate_id is not None and build_item_index is None:
+        co_indices = _get_bambu_co_plate_indices(source_3mf, plate_id)
+        if co_indices:
+            effective_plate_ids = co_indices
+
     try:
         geom = await asyncio.to_thread(
             list_build_item_geometry_3mf,
             source_3mf,
-            plate_id=plate_id,
+            plate_id=plate_id if effective_plate_ids is None else None,
+            plate_ids=effective_plate_ids,
             build_item_index=build_item_index,
             max_triangles_per_object=max_triangles,
             include_modifiers=include_modifiers,
