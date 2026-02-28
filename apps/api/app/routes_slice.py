@@ -2080,8 +2080,10 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             job_logger.error(f"Upload {upload_id} is not a multi-plate file")
             raise HTTPException(status_code=400, detail="Not a multi-plate file - use /uploads/{id}/slice instead")
 
-        # Validate requested plate exists
-        target_plate = model.get_plate(request.plate_id)
+        # Validate requested plate exists.
+        # UI sends build-item indices (from parse_multi_plate_3mf); for Bambu files
+        # these differ from logical plater_ids, so map via item_to_plate first.
+        target_plate = model.get_plate_for_item(request.plate_id) or model.get_plate(request.plate_id)
         if not target_plate:
             job_logger.error(f"Plate {request.plate_id} not found in file")
             raise HTTPException(status_code=404, detail=f"Plate {request.plate_id} not found")

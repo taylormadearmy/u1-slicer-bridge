@@ -869,10 +869,11 @@ def _group_items_into_plates(
     For everything else: each build item is its own plate (1:1).
     """
     if model.is_bambu and bambu_plate_defs:
-        # Build object_id → item index map
-        oid_to_item: Dict[str, BuildItem] = {}
+        # Build object_id → items map (list — same object_id can appear in
+        # multiple build items for instanced/copy models).
+        oid_to_items: Dict[str, List[BuildItem]] = {}
         for it in model.all_items:
-            oid_to_item[it.object_id] = it
+            oid_to_items.setdefault(it.object_id, []).append(it)
 
         # Group by Bambu plate definitions
         assigned_items: set = set()
@@ -881,8 +882,7 @@ def _group_items_into_plates(
             plate_items: List[BuildItem] = []
             plate_assemble: Dict[str, List[float]] = {}
             for oid in obj_ids:
-                it = oid_to_item.get(oid)
-                if it is not None:
+                for it in oid_to_items.get(oid, []):
                     plate_items.append(it)
                     assigned_items.add(it.index)
                 at = bambu_assemble_by_object.get(oid)
