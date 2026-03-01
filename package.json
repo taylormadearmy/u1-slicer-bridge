@@ -4,7 +4,7 @@
   "description": "Self-hostable Docker-first service for Snapmaker U1 3D printing",
   "scripts": {
     "test": "npx playwright test",
-    "test:fast": "npx playwright test tests/smoke.spec.ts tests/api.spec.ts tests/errors.spec.ts tests/upload.spec.ts tests/stl-upload.spec.ts tests/multicolour.spec.ts tests/multiplate.spec.ts tests/responsive.spec.ts tests/settings.spec.ts tests/slicing.spec.ts tests/backup-restore.spec.ts tests/copies.spec.ts --grep-invert @extended",
+    "test:fast": "npx playwright test tests/smoke.spec.ts tests/api.spec.ts tests/errors.spec.ts tests/upload.spec.ts tests/stl-upload.spec.ts tests/multicolour.spec.ts tests/multicolour-slice.spec.ts tests/multiplate.spec.ts tests/responsive.spec.ts tests/settings.spec.ts tests/slicing.spec.ts tests/backup-restore.spec.ts tests/copies.spec.ts --grep-invert @extended",
     "test:extended": "npx playwright test tests/multicolour.spec.ts tests/multiplate.spec.ts tests/slicing.spec.ts --grep @extended",
     "test:smoke": "npx playwright test tests/smoke.spec.ts tests/api.spec.ts tests/responsive.spec.ts",
     "test:upload": "npx playwright test tests/upload.spec.ts",

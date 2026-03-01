@@ -1547,9 +1547,9 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 if idx < len(extruder_colors):
                     extruder_colors[idx] = color
         
-        # Pad to 4 extruders (use last values for unused extruders)
+        # Pad to 4 extruders (unused nozzles get 0°C to avoid heating)
         while len(nozzle_temps) < 4:
-            nozzle_temps.append(nozzle_temps[-1] if nozzle_temps else "200")
+            nozzle_temps.append("0")
         while len(bed_temps) < 4:
             bed_temps.append(bed_temps[-1] if bed_temps else "60")
         while len(extruder_colors) < 4:
@@ -1558,11 +1558,21 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             material_types.append(material_types[-1] if material_types else "PLA")
         while len(profile_names) < 4:
             profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
-        
+
+        # Zero out nozzle temps for extruder positions not actively used.
+        # Frontend fills gap positions with a default filament (which has a real temp),
+        # so we must explicitly disable heating for unused physical extruders.
+        if request.extruder_assignments:
+            active_positions = set(request.extruder_assignments)
+            for i in range(len(nozzle_temps)):
+                if i not in active_positions:
+                    nozzle_temps[i] = "0"
+            job_logger.info(f"Active extruder positions: {sorted(active_positions)}, zeroed inactive nozzle temps")
+
         # Create extruder count setting (how many filaments we're using)
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
         extruder_count = max(len(filaments), remap_slots)
-        
+
         # Get the first filament's bed type for the plate
         first_filament = filaments[0]
         bed_type = request.bed_type if request.bed_type is not None else first_filament.get("bed_type", "PEI")
@@ -1664,7 +1674,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_settings=filament_settings,
                 overrides=overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 preserve_geometry=True,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
@@ -1815,7 +1825,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_settings=filament_settings,
                 overrides=retry_overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 preserve_geometry=True,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
@@ -1895,15 +1905,13 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         gcode_workspace_path = gcode_files[0]
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
-        if len(filaments) > 1 and extruder_remap:
-            if has_overflow_extruders:
-                # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
-                # Post-slice remap only needs to fix compaction within 1-4.
-                effective_extruders = sorted(set(extruder_remap.values()))
-                target_tools = [ext - 1 for ext in effective_extruders]
-            else:
-                ordered_sources = sorted(extruder_remap.keys())
-                target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+        if len(filaments) > 1 and extruder_remap and has_overflow_extruders:
+            # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
+            # Post-slice remap only needs to fix compaction within 1-4.
+            # Non-overflow remaps (e.g. E1,E2→E3,E4) are handled pre-slice
+            # so OrcaSlicer generates correct tool numbers and is_extruder_used[].
+            effective_extruders = sorted(set(extruder_remap.values()))
+            target_tools = [ext - 1 for ext in effective_extruders]
             remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
             if remap_result.get("applied"):
                 job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
@@ -2333,9 +2341,9 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 if idx < len(extruder_colors):
                     extruder_colors[idx] = color
         
-        # Pad to 4 extruders
+        # Pad to 4 extruders (unused nozzles get 0°C to avoid heating)
         while len(nozzle_temps) < 4:
-            nozzle_temps.append(nozzle_temps[-1] if nozzle_temps else "200")
+            nozzle_temps.append("0")
         while len(bed_temps) < 4:
             bed_temps.append(bed_temps[-1] if bed_temps else "60")
         while len(extruder_colors) < 4:
@@ -2344,7 +2352,17 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             material_types.append(material_types[-1] if material_types else "PLA")
         while len(profile_names) < 4:
             profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
-        
+
+        # Zero out nozzle temps for extruder positions not actively used.
+        # Frontend fills gap positions with a default filament (which has a real temp),
+        # so we must explicitly disable heating for unused physical extruders.
+        if request.extruder_assignments:
+            active_positions = set(request.extruder_assignments)
+            for i in range(len(nozzle_temps)):
+                if i not in active_positions:
+                    nozzle_temps[i] = "0"
+            job_logger.info(f"Active extruder positions: {sorted(active_positions)}, zeroed inactive nozzle temps")
+
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
         extruder_count = max(len(filaments), remap_slots)
         first_filament = filaments[0]
@@ -2455,7 +2473,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_settings=filament_settings,
                 overrides=overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
                 precomputed_has_layer_changes=model.has_layer_tool_changes,
@@ -2586,7 +2604,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_settings=filament_settings,
                 overrides=retry_overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 preserve_geometry=True,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
@@ -2647,15 +2665,13 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         gcode_workspace_path = gcode_files[0]
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
-        if len(filaments) > 1 and extruder_remap:
-            if has_overflow_extruders:
-                # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
-                # Post-slice remap only needs to fix compaction within 1-4.
-                effective_extruders = sorted(set(extruder_remap.values()))
-                target_tools = [ext - 1 for ext in effective_extruders]
-            else:
-                ordered_sources = sorted(extruder_remap.keys())
-                target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+        if len(filaments) > 1 and extruder_remap and has_overflow_extruders:
+            # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
+            # Post-slice remap only needs to fix compaction within 1-4.
+            # Non-overflow remaps (e.g. E1,E2→E3,E4) are handled pre-slice
+            # so OrcaSlicer generates correct tool numbers and is_extruder_used[].
+            effective_extruders = sorted(set(extruder_remap.values()))
+            target_tools = [ext - 1 for ext in effective_extruders]
             remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
             if remap_result.get("applied"):
                 job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
