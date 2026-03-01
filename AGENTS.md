@@ -164,7 +164,7 @@ git tag v1.x.x-beta.1 && git push origin v1.x.x-beta.1
 git tag v1.x.x && git push origin v1.x.x
 ```
 
-This triggers `.github/workflows/release.yml` which builds and pushes `ghcr.io/taylormadearmy/u1-slicer-bridge-{api,web}`. Beta tags get `:beta`, stable tags get `:latest`. Production users pulling `docker-compose.prod.yml` get updates via `:latest`.
+This triggers `.github/workflows/release.yml` which builds and pushes Docker images to GHCR, creates a GitHub Release with auto-generated notes, and attaches `docker-compose.prod.yml`. Beta tags get `:beta` + prerelease flag, stable tags get `:latest`.
 
 ### Third-Party License Attribution
 

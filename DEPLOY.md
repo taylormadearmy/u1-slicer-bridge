@@ -5,8 +5,8 @@
 **Prerequisites:** Docker and Docker Compose installed.
 
 ```bash
-# 1. Download the production compose file
-curl -O https://raw.githubusercontent.com/taylormadearmy/u1-slicer-bridge/master/docker-compose.prod.yml
+# 1. Download the production compose file (from latest stable release)
+curl -LO https://github.com/taylormadearmy/u1-slicer-bridge/releases/latest/download/docker-compose.prod.yml
 
 # 2. Start all services
 docker compose -f docker-compose.prod.yml up -d
