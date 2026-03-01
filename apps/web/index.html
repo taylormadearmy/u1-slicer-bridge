@@ -552,7 +552,6 @@
                                                         <span class="font-medium" x-text="`E${(sliceSettings.extruder_assignments?.[idx] ?? idx) + 1}`"></span>
                                                         <div class="w-3 h-3 rounded-full border border-gray-300 flex-shrink-0"
                                                              :style="`background-color: ${extruderPresets[(sliceSettings.extruder_assignments?.[idx] ?? idx)]?.color_hex || '#FFFFFF'}`"></div>
-                                                        <span class="text-gray-500" x-text="`(${colorName(extruderPresets[(sliceSettings.extruder_assignments?.[idx] ?? idx)]?.color_hex || '#FFFFFF')})`"></span>
                                                         <span class="text-gray-400">&#8226;</span>
                                                         <span class="text-gray-600" x-text="getFilamentById(selectedFilaments?.[idx])?.name || 'Unassigned'"></span>
                                                     </div>
@@ -595,14 +594,27 @@
                                                                            x-model="sliceSettings.filament_colors[idx]"
                                                                            class="w-8 h-8 rounded cursor-pointer border-0"
                                                                            title="Click to change color">
-                                                                    <select :value="sliceSettings.extruder_assignments[idx]"
-                                                                            @change="setExtruderAssignment(idx, Number($event.target.value))"
-                                                                            class="w-36 text-xs border border-gray-300 rounded px-1 py-1 bg-white text-gray-900">
-                                                                        <option value="0" x-text="`E1 (${colorName(extruderPresets[0]?.color_hex || '#FFFFFF')})`"></option>
-                                                                        <option value="1" x-text="`E2 (${colorName(extruderPresets[1]?.color_hex || '#FFFFFF')})`"></option>
-                                                                        <option value="2" x-text="`E3 (${colorName(extruderPresets[2]?.color_hex || '#FFFFFF')})`"></option>
-                                                                        <option value="3" x-text="`E4 (${colorName(extruderPresets[3]?.color_hex || '#FFFFFF')})`"></option>
-                                                                    </select>
+                                                                    <div x-data="{ open: false }" class="relative" @click.outside="open = false">
+                                                                        <button type="button" @click="open = !open"
+                                                                                class="flex items-center gap-1.5 px-2 py-1 text-xs border border-gray-300 rounded bg-white text-gray-900 hover:bg-gray-50 w-24">
+                                                                            <span class="inline-block w-3 h-3 rounded-full border border-gray-300 flex-shrink-0"
+                                                                                  :style="`background-color: ${extruderPresets[sliceSettings.extruder_assignments[idx]]?.color_hex || '#FFFFFF'}`"></span>
+                                                                            <span x-text="`E${(sliceSettings.extruder_assignments[idx] ?? idx) + 1}`"></span>
+                                                                            <svg class="w-3 h-3 ml-auto text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                                                                        </button>
+                                                                        <div x-show="open" x-cloak class="absolute z-50 mt-1 w-28 bg-white border border-gray-200 rounded-lg shadow-lg py-1">
+                                                                            <template x-for="ei in [0,1,2,3]" :key="ei">
+                                                                                <button type="button"
+                                                                                        @click="setExtruderAssignment(idx, ei); open = false"
+                                                                                        class="flex items-center gap-2 w-full px-2 py-1.5 text-xs hover:bg-blue-50 text-left"
+                                                                                        :class="sliceSettings.extruder_assignments[idx] === ei ? 'bg-blue-50 font-semibold' : ''">
+                                                                                    <span class="inline-block w-3 h-3 rounded-full border border-gray-300 flex-shrink-0"
+                                                                                          :style="`background-color: ${extruderPresets[ei]?.color_hex || '#FFFFFF'}`"></span>
+                                                                                    <span x-text="`E${ei + 1}`"></span>
+                                                                                </button>
+                                                                            </template>
+                                                                        </div>
+                                                                    </div>
                                                                     <select x-model.number="selectedFilaments[idx]"
                                                                             @change="syncFilamentColors()"
                                                                             class="flex-1 min-w-0 text-xs border border-gray-300 rounded px-2 py-1 bg-white text-gray-900 truncate">

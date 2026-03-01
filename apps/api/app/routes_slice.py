@@ -1541,28 +1541,65 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             material_types.append(str(f.get("material", "PLA") or "PLA"))
             profile_names.append(str(f.get("name", "Snapmaker PLA") or "Snapmaker PLA"))
         
-        # Override colors if user specified custom colors per extruder
+        # Place filament settings into correct positional slots.
+        # When extruder_assignments maps filaments to non-default positions
+        # (e.g. filament_ids=[A,B] + assignments=[2,3]), scatter each
+        # filament's properties into the assigned slot so temps/colors
+        # align with physical extruder positions.
+        if request.extruder_assignments:
+            pos_nozzle = ["0"] * 4
+            default_bed = bed_temps[-1] if bed_temps else "60"
+            pos_bed = [default_bed] * 4
+            pos_colors = ["#FFFFFF"] * 4
+            default_mat = material_types[-1] if material_types else "PLA"
+            pos_materials = [default_mat] * 4
+            default_prof = profile_names[-1] if profile_names else "Snapmaker PLA"
+            pos_profiles = [default_prof] * 4
+
+            for i, pos in enumerate(request.extruder_assignments):
+                if pos < 4:
+                    if i < len(nozzle_temps):
+                        pos_nozzle[pos] = nozzle_temps[i]
+                    if i < len(bed_temps):
+                        pos_bed[pos] = bed_temps[i]
+                    if i < len(extruder_colors):
+                        pos_colors[pos] = extruder_colors[i]
+                    if i < len(material_types):
+                        pos_materials[pos] = material_types[i]
+                    if i < len(profile_names):
+                        pos_profiles[pos] = profile_names[i]
+
+            nozzle_temps = pos_nozzle
+            bed_temps = pos_bed
+            extruder_colors = pos_colors
+            material_types = pos_materials
+            profile_names = pos_profiles
+            job_logger.info(f"Positioned filament settings to extruder slots: {sorted(set(request.extruder_assignments))}, nozzle_temps={nozzle_temps}")
+        else:
+            # No assignments — pad sequentially (unused nozzles get 0°C)
+            while len(nozzle_temps) < 4:
+                nozzle_temps.append("0")
+            while len(bed_temps) < 4:
+                bed_temps.append(bed_temps[-1] if bed_temps else "60")
+            while len(extruder_colors) < 4:
+                extruder_colors.append("#FFFFFF")
+            while len(material_types) < 4:
+                material_types.append(material_types[-1] if material_types else "PLA")
+            while len(profile_names) < 4:
+                profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
+
+        # Override colors if user specified custom colors per extruder.
+        # Applied AFTER scatter so request.filament_colors (a positional 4-slot
+        # array from the UI) patches the full positional extruder_colors array.
         if request.filament_colors:
             for idx, color in enumerate(request.filament_colors):
                 if idx < len(extruder_colors):
                     extruder_colors[idx] = color
-        
-        # Pad to 4 extruders (use last values for unused extruders)
-        while len(nozzle_temps) < 4:
-            nozzle_temps.append(nozzle_temps[-1] if nozzle_temps else "200")
-        while len(bed_temps) < 4:
-            bed_temps.append(bed_temps[-1] if bed_temps else "60")
-        while len(extruder_colors) < 4:
-            extruder_colors.append("#FFFFFF")
-        while len(material_types) < 4:
-            material_types.append(material_types[-1] if material_types else "PLA")
-        while len(profile_names) < 4:
-            profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
-        
+
         # Create extruder count setting (how many filaments we're using)
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
         extruder_count = max(len(filaments), remap_slots)
-        
+
         # Get the first filament's bed type for the plate
         first_filament = filaments[0]
         bed_type = request.bed_type if request.bed_type is not None else first_filament.get("bed_type", "PEI")
@@ -1664,7 +1701,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_settings=filament_settings,
                 overrides=overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 preserve_geometry=True,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
@@ -1815,7 +1852,7 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 filament_settings=filament_settings,
                 overrides=retry_overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 preserve_geometry=True,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
@@ -1895,15 +1932,13 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         gcode_workspace_path = gcode_files[0]
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
-        if len(filaments) > 1 and extruder_remap:
-            if has_overflow_extruders:
-                # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
-                # Post-slice remap only needs to fix compaction within 1-4.
-                effective_extruders = sorted(set(extruder_remap.values()))
-                target_tools = [ext - 1 for ext in effective_extruders]
-            else:
-                ordered_sources = sorted(extruder_remap.keys())
-                target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+        if len(filaments) > 1 and extruder_remap and has_overflow_extruders:
+            # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
+            # Post-slice remap only needs to fix compaction within 1-4.
+            # Non-overflow remaps (e.g. E1,E2→E3,E4) are handled pre-slice
+            # so OrcaSlicer generates correct tool numbers and is_extruder_used[].
+            effective_extruders = sorted(set(extruder_remap.values()))
+            target_tools = [ext - 1 for ext in effective_extruders]
             remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
             if remap_result.get("applied"):
                 job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
@@ -1962,8 +1997,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         gcode_size_mb = gcode_size / 1024 / 1024
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
-        # Update database with results
-        filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
+        # Update database with results — extract colors from active positions
+        # After scatter, extruder_colors is positional (e.g. assignments [2,3]
+        # puts colors at indices 2,3). Use assigned positions, not [:len].
+        if request.extruder_assignments:
+            active_colors = [extruder_colors[pos] for pos in request.extruder_assignments if pos < len(extruder_colors)]
+        else:
+            active_colors = extruder_colors[:len(filaments)]
+        filament_colors_json = json.dumps(active_colors)
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             # Only mark completed if the job hasn't been cancelled in the meantime.
@@ -2026,7 +2067,6 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             display_colors = detected_colors
         else:
             display_colors = json.loads(filament_colors_json)
-
         _clear_progress(job_id)
         return {
             "job_id": job_id,
@@ -2327,24 +2367,61 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             material_types.append(str(f.get("material", "PLA") or "PLA"))
             profile_names.append(str(f.get("name", "Snapmaker PLA") or "Snapmaker PLA"))
         
-        # Override colors if user specified custom colors per extruder
+        # Place filament settings into correct positional slots.
+        # When extruder_assignments maps filaments to non-default positions
+        # (e.g. filament_ids=[A,B] + assignments=[2,3]), scatter each
+        # filament's properties into the assigned slot so temps/colors
+        # align with physical extruder positions.
+        if request.extruder_assignments:
+            pos_nozzle = ["0"] * 4
+            default_bed = bed_temps[-1] if bed_temps else "60"
+            pos_bed = [default_bed] * 4
+            pos_colors = ["#FFFFFF"] * 4
+            default_mat = material_types[-1] if material_types else "PLA"
+            pos_materials = [default_mat] * 4
+            default_prof = profile_names[-1] if profile_names else "Snapmaker PLA"
+            pos_profiles = [default_prof] * 4
+
+            for i, pos in enumerate(request.extruder_assignments):
+                if pos < 4:
+                    if i < len(nozzle_temps):
+                        pos_nozzle[pos] = nozzle_temps[i]
+                    if i < len(bed_temps):
+                        pos_bed[pos] = bed_temps[i]
+                    if i < len(extruder_colors):
+                        pos_colors[pos] = extruder_colors[i]
+                    if i < len(material_types):
+                        pos_materials[pos] = material_types[i]
+                    if i < len(profile_names):
+                        pos_profiles[pos] = profile_names[i]
+
+            nozzle_temps = pos_nozzle
+            bed_temps = pos_bed
+            extruder_colors = pos_colors
+            material_types = pos_materials
+            profile_names = pos_profiles
+            job_logger.info(f"Positioned filament settings to extruder slots: {sorted(set(request.extruder_assignments))}, nozzle_temps={nozzle_temps}")
+        else:
+            # No assignments — pad sequentially (unused nozzles get 0°C)
+            while len(nozzle_temps) < 4:
+                nozzle_temps.append("0")
+            while len(bed_temps) < 4:
+                bed_temps.append(bed_temps[-1] if bed_temps else "60")
+            while len(extruder_colors) < 4:
+                extruder_colors.append("#FFFFFF")
+            while len(material_types) < 4:
+                material_types.append(material_types[-1] if material_types else "PLA")
+            while len(profile_names) < 4:
+                profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
+
+        # Override colors if user specified custom colors per extruder.
+        # Applied AFTER scatter so request.filament_colors (a positional 4-slot
+        # array from the UI) patches the full positional extruder_colors array.
         if request.filament_colors:
             for idx, color in enumerate(request.filament_colors):
                 if idx < len(extruder_colors):
                     extruder_colors[idx] = color
-        
-        # Pad to 4 extruders
-        while len(nozzle_temps) < 4:
-            nozzle_temps.append(nozzle_temps[-1] if nozzle_temps else "200")
-        while len(bed_temps) < 4:
-            bed_temps.append(bed_temps[-1] if bed_temps else "60")
-        while len(extruder_colors) < 4:
-            extruder_colors.append("#FFFFFF")
-        while len(material_types) < 4:
-            material_types.append(material_types[-1] if material_types else "PLA")
-        while len(profile_names) < 4:
-            profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
-        
+
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
         extruder_count = max(len(filaments), remap_slots)
         first_filament = filaments[0]
@@ -2455,7 +2532,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_settings=filament_settings,
                 overrides=overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
                 precomputed_has_layer_changes=model.has_layer_tool_changes,
@@ -2586,7 +2663,7 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 filament_settings=filament_settings,
                 overrides=retry_overrides,
                 requested_filament_count=extruder_count,
-                extruder_remap=extruder_remap if has_overflow_extruders else None,
+                extruder_remap=extruder_remap or None,
                 preserve_geometry=True,
                 precomputed_is_bambu=model.is_bambu,
                 precomputed_has_multi_assignments=model.has_multi_extruder_assignments,
@@ -2647,15 +2724,13 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         gcode_workspace_path = gcode_files[0]
         job_logger.info(f"Found G-code file: {gcode_workspace_path.name}")
 
-        if len(filaments) > 1 and extruder_remap:
-            if has_overflow_extruders:
-                # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
-                # Post-slice remap only needs to fix compaction within 1-4.
-                effective_extruders = sorted(set(extruder_remap.values()))
-                target_tools = [ext - 1 for ext in effective_extruders]
-            else:
-                ordered_sources = sorted(extruder_remap.keys())
-                target_tools = [extruder_remap[src] - 1 for src in ordered_sources]
+        if len(filaments) > 1 and extruder_remap and has_overflow_extruders:
+            # Pre-slice remap already collapsed >4 to 1-4 in the 3MF.
+            # Post-slice remap only needs to fix compaction within 1-4.
+            # Non-overflow remaps (e.g. E1,E2→E3,E4) are handled pre-slice
+            # so OrcaSlicer generates correct tool numbers and is_extruder_used[].
+            effective_extruders = sorted(set(extruder_remap.values()))
+            target_tools = [ext - 1 for ext in effective_extruders]
             remap_result = slicer.remap_compacted_tools(gcode_workspace_path, target_tools)
             if remap_result.get("applied"):
                 job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
@@ -2715,8 +2790,12 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         gcode_size_mb = gcode_size / 1024 / 1024
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
-        # Update database with results
-        filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
+        # Update database with results — extract colors from active positions
+        if request.extruder_assignments:
+            active_colors = [extruder_colors[pos] for pos in request.extruder_assignments if pos < len(extruder_colors)]
+        else:
+            active_colors = extruder_colors[:len(filaments)]
+        filament_colors_json = json.dumps(active_colors)
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             result_tag = await conn.execute(

@@ -2963,9 +2963,8 @@ function app() {
             if (mappedFromPresets && mappedFromPresets.filamentIds.length === allColors.length) {
                 this.selectedFilaments = mappedFromPresets.filamentIds;
                 this.sliceSettings.extruder_assignments = mappedFromPresets.assignments;
-                // Use the preset/extruder colors (what's physically loaded), not the
-                // detected file colors (what the designer intended). syncFilamentColors
-                // will further refine from filament profile color_hex if available.
+                // Use preset/physical colors for filament_colors — these represent
+                // what's actually loaded in the extruder and drive the G-code viewer.
                 this.sliceSettings.filament_colors = mappedFromPresets.mappedColors;
                 this.syncFilamentColors();
                 return;
@@ -3027,6 +3026,7 @@ function app() {
                 // If the filament profile has a real (non-default) color, use it.
                 if (profileColor && profileColor.toUpperCase() !== '#FFFFFF') return profileColor;
                 // Use the assigned extruder slot (not position index) for preset lookup.
+                // Preset colors reflect what's physically loaded in the extruder.
                 const presetIdx = assignments[idx] ?? idx;
                 const presetColor = this.extruderPresets?.[presetIdx]?.color_hex;
                 if (presetColor && presetColor.toUpperCase() !== '#FFFFFF') return presetColor;
