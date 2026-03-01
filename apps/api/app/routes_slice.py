@@ -33,6 +33,7 @@ from parser_3mf import detect_colors_from_3mf, detect_colors_per_plate, detect_p
 from threemf_model import parse_threemf, apply_user_moves
 from scale_3mf import apply_uniform_scale_to_3mf, apply_layout_scale_to_3mf
 from transform_3mf import apply_object_transforms_to_3mf
+from gcode_thumbnails import inject_gcode_thumbnails
 
 
 router = APIRouter(tags=["slicing"])
@@ -1909,6 +1910,15 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             else:
                 job_logger.info(f"Tool remap skipped: {remap_result}")
 
+        # Inject thumbnails from 3MF preview into G-code for printer display
+        thumb_result = await asyncio.to_thread(
+            inject_gcode_thumbnails, gcode_workspace_path, source_3mf
+        )
+        if thumb_result.get("injected"):
+            job_logger.info(f"Injected thumbnails: {thumb_result['sizes']}")
+        else:
+            job_logger.info(f"Thumbnail injection skipped: {thumb_result.get('reason')}")
+
         # Parse G-code metadata (async to avoid blocking event loop)
         _update_progress(job_id, 88, "Parsing G-code metadata")
         job_logger.info("Parsing G-code metadata...")
@@ -2651,6 +2661,16 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 job_logger.info(f"Remapped compacted tools: {remap_result.get('map')}")
             else:
                 job_logger.info(f"Tool remap skipped: {remap_result}")
+
+        # Inject thumbnails from 3MF preview into G-code for printer display
+        thumb_result = await asyncio.to_thread(
+            inject_gcode_thumbnails, gcode_workspace_path, source_3mf,
+            plate_id=request.plate_id,
+        )
+        if thumb_result.get("injected"):
+            job_logger.info(f"Injected thumbnails: {thumb_result['sizes']}")
+        else:
+            job_logger.info(f"Thumbnail injection skipped: {thumb_result.get('reason')}")
 
         # Parse G-code metadata (async to avoid blocking event loop)
         _update_progress(job_id, 88, "Parsing G-code metadata")
