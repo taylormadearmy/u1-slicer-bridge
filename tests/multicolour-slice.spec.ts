@@ -182,4 +182,56 @@ test.describe('Multicolour Slicing End-to-End (M11)', () => {
     expect(execGcode).not.toMatch(/SM_PRINT_AUTO_FEED\s+EXTRUDER=0/);
     expect(execGcode).not.toMatch(/SM_PRINT_AUTO_FEED\s+EXTRUDER=1/);
   });
+
+  test('sparse filament_ids [A,B] + assignments [2,3] heats E3+E4, not all-zero (API regression)', async ({ request }) => {
+    // Regression: when API consumer sends only 2 filament_ids (not 4 gap-fillers)
+    // with extruder_assignments [2,3], the sequential temp array [T_A, T_B, "0", "0"]
+    // was padded then zeroed — resulting in all nozzles at 0°C because the active
+    // slots (2,3) held padding zeros. Fix: scatter temps into assigned positions.
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+    const fil = await getDefaultFilament(request);
+
+    // Only 2 filament_ids — no gap-fillers, direct API usage
+    const res = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+      data: {
+        filament_ids: [fil.id, fil.id],
+        extruder_assignments: [2, 3],
+        layer_height: 0.2,
+        infill_density: 15,
+        supports: false,
+      },
+      timeout: 120_000,
+    });
+    expect(res.ok()).toBe(true);
+    const job = await waitForJobComplete(request, await res.json());
+    expect(job.status).toBe('completed');
+
+    // Download G-code and verify nozzle temps are non-zero for active extruders
+    const dlRes = await request.get(`${API}/jobs/${job.job_id}/download`, { timeout: 120_000 });
+    expect(dlRes.ok()).toBe(true);
+    const gcode = await dlRes.text();
+
+    // Verify correct tool numbers (T2/T3, not T0/T1)
+    const toolChangeLines = gcode.split('\n').filter(
+      (line) => /^T[0-3]\s*$/.test(line.trim())
+    );
+    const tools = new Set(toolChangeLines.map((l) => l.trim()));
+    expect(tools.has('T2')).toBe(true);
+    expect(tools.has('T3')).toBe(true);
+    expect(tools.has('T0')).toBe(false);
+    expect(tools.has('T1')).toBe(false);
+
+    // Verify nozzle temperature commands exist with non-zero values.
+    // M104/M109 set nozzle temp; active extruders must have real temps.
+    const tempLines = gcode.split('\n').filter(
+      (line) => /^M10[49]\s/.test(line.trim()) && !/^;/.test(line.trim())
+    );
+    const temps = tempLines.map((l) => {
+      const m = l.match(/S(\d+)/);
+      return m ? parseInt(m[1], 10) : 0;
+    });
+    // At least some temp commands must be non-zero (filament nozzle temp)
+    const nonZeroTemps = temps.filter((t) => t > 0);
+    expect(nonZeroTemps.length).toBeGreaterThan(0);
+  });
 });

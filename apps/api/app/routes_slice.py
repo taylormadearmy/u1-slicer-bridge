@@ -1546,28 +1546,53 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             for idx, color in enumerate(request.filament_colors):
                 if idx < len(extruder_colors):
                     extruder_colors[idx] = color
-        
-        # Pad to 4 extruders (unused nozzles get 0°C to avoid heating)
-        while len(nozzle_temps) < 4:
-            nozzle_temps.append("0")
-        while len(bed_temps) < 4:
-            bed_temps.append(bed_temps[-1] if bed_temps else "60")
-        while len(extruder_colors) < 4:
-            extruder_colors.append("#FFFFFF")
-        while len(material_types) < 4:
-            material_types.append(material_types[-1] if material_types else "PLA")
-        while len(profile_names) < 4:
-            profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
 
-        # Zero out nozzle temps for extruder positions not actively used.
-        # Frontend fills gap positions with a default filament (which has a real temp),
-        # so we must explicitly disable heating for unused physical extruders.
+        # Place filament settings into correct positional slots.
+        # When extruder_assignments maps filaments to non-default positions
+        # (e.g. filament_ids=[A,B] + assignments=[2,3]), scatter each
+        # filament's properties into the assigned slot so temps/colors
+        # align with physical extruder positions.
         if request.extruder_assignments:
-            active_positions = set(request.extruder_assignments)
-            for i in range(len(nozzle_temps)):
-                if i not in active_positions:
-                    nozzle_temps[i] = "0"
-            job_logger.info(f"Active extruder positions: {sorted(active_positions)}, zeroed inactive nozzle temps")
+            pos_nozzle = ["0"] * 4
+            default_bed = bed_temps[-1] if bed_temps else "60"
+            pos_bed = [default_bed] * 4
+            pos_colors = ["#FFFFFF"] * 4
+            default_mat = material_types[-1] if material_types else "PLA"
+            pos_materials = [default_mat] * 4
+            default_prof = profile_names[-1] if profile_names else "Snapmaker PLA"
+            pos_profiles = [default_prof] * 4
+
+            for i, pos in enumerate(request.extruder_assignments):
+                if pos < 4:
+                    if i < len(nozzle_temps):
+                        pos_nozzle[pos] = nozzle_temps[i]
+                    if i < len(bed_temps):
+                        pos_bed[pos] = bed_temps[i]
+                    if i < len(extruder_colors):
+                        pos_colors[pos] = extruder_colors[i]
+                    if i < len(material_types):
+                        pos_materials[pos] = material_types[i]
+                    if i < len(profile_names):
+                        pos_profiles[pos] = profile_names[i]
+
+            nozzle_temps = pos_nozzle
+            bed_temps = pos_bed
+            extruder_colors = pos_colors
+            material_types = pos_materials
+            profile_names = pos_profiles
+            job_logger.info(f"Positioned filament settings to extruder slots: {sorted(set(request.extruder_assignments))}, nozzle_temps={nozzle_temps}")
+        else:
+            # No assignments — pad sequentially (unused nozzles get 0°C)
+            while len(nozzle_temps) < 4:
+                nozzle_temps.append("0")
+            while len(bed_temps) < 4:
+                bed_temps.append(bed_temps[-1] if bed_temps else "60")
+            while len(extruder_colors) < 4:
+                extruder_colors.append("#FFFFFF")
+            while len(material_types) < 4:
+                material_types.append(material_types[-1] if material_types else "PLA")
+            while len(profile_names) < 4:
+                profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
 
         # Create extruder count setting (how many filaments we're using)
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
@@ -2340,28 +2365,53 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             for idx, color in enumerate(request.filament_colors):
                 if idx < len(extruder_colors):
                     extruder_colors[idx] = color
-        
-        # Pad to 4 extruders (unused nozzles get 0°C to avoid heating)
-        while len(nozzle_temps) < 4:
-            nozzle_temps.append("0")
-        while len(bed_temps) < 4:
-            bed_temps.append(bed_temps[-1] if bed_temps else "60")
-        while len(extruder_colors) < 4:
-            extruder_colors.append("#FFFFFF")
-        while len(material_types) < 4:
-            material_types.append(material_types[-1] if material_types else "PLA")
-        while len(profile_names) < 4:
-            profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
 
-        # Zero out nozzle temps for extruder positions not actively used.
-        # Frontend fills gap positions with a default filament (which has a real temp),
-        # so we must explicitly disable heating for unused physical extruders.
+        # Place filament settings into correct positional slots.
+        # When extruder_assignments maps filaments to non-default positions
+        # (e.g. filament_ids=[A,B] + assignments=[2,3]), scatter each
+        # filament's properties into the assigned slot so temps/colors
+        # align with physical extruder positions.
         if request.extruder_assignments:
-            active_positions = set(request.extruder_assignments)
-            for i in range(len(nozzle_temps)):
-                if i not in active_positions:
-                    nozzle_temps[i] = "0"
-            job_logger.info(f"Active extruder positions: {sorted(active_positions)}, zeroed inactive nozzle temps")
+            pos_nozzle = ["0"] * 4
+            default_bed = bed_temps[-1] if bed_temps else "60"
+            pos_bed = [default_bed] * 4
+            pos_colors = ["#FFFFFF"] * 4
+            default_mat = material_types[-1] if material_types else "PLA"
+            pos_materials = [default_mat] * 4
+            default_prof = profile_names[-1] if profile_names else "Snapmaker PLA"
+            pos_profiles = [default_prof] * 4
+
+            for i, pos in enumerate(request.extruder_assignments):
+                if pos < 4:
+                    if i < len(nozzle_temps):
+                        pos_nozzle[pos] = nozzle_temps[i]
+                    if i < len(bed_temps):
+                        pos_bed[pos] = bed_temps[i]
+                    if i < len(extruder_colors):
+                        pos_colors[pos] = extruder_colors[i]
+                    if i < len(material_types):
+                        pos_materials[pos] = material_types[i]
+                    if i < len(profile_names):
+                        pos_profiles[pos] = profile_names[i]
+
+            nozzle_temps = pos_nozzle
+            bed_temps = pos_bed
+            extruder_colors = pos_colors
+            material_types = pos_materials
+            profile_names = pos_profiles
+            job_logger.info(f"Positioned filament settings to extruder slots: {sorted(set(request.extruder_assignments))}, nozzle_temps={nozzle_temps}")
+        else:
+            # No assignments — pad sequentially (unused nozzles get 0°C)
+            while len(nozzle_temps) < 4:
+                nozzle_temps.append("0")
+            while len(bed_temps) < 4:
+                bed_temps.append(bed_temps[-1] if bed_temps else "60")
+            while len(extruder_colors) < 4:
+                extruder_colors.append("#FFFFFF")
+            while len(material_types) < 4:
+                material_types.append(material_types[-1] if material_types else "PLA")
+            while len(profile_names) < 4:
+                profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
 
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
         extruder_count = max(len(filaments), remap_slots)
