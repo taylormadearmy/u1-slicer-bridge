@@ -1541,12 +1541,6 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             material_types.append(str(f.get("material", "PLA") or "PLA"))
             profile_names.append(str(f.get("name", "Snapmaker PLA") or "Snapmaker PLA"))
         
-        # Override colors if user specified custom colors per extruder
-        if request.filament_colors:
-            for idx, color in enumerate(request.filament_colors):
-                if idx < len(extruder_colors):
-                    extruder_colors[idx] = color
-
         # Place filament settings into correct positional slots.
         # When extruder_assignments maps filaments to non-default positions
         # (e.g. filament_ids=[A,B] + assignments=[2,3]), scatter each
@@ -1593,6 +1587,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
                 material_types.append(material_types[-1] if material_types else "PLA")
             while len(profile_names) < 4:
                 profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
+
+        # Override colors if user specified custom colors per extruder.
+        # Applied AFTER scatter so request.filament_colors (a positional 4-slot
+        # array from the UI) patches the full positional extruder_colors array.
+        if request.filament_colors:
+            for idx, color in enumerate(request.filament_colors):
+                if idx < len(extruder_colors):
+                    extruder_colors[idx] = color
 
         # Create extruder count setting (how many filaments we're using)
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
@@ -1995,8 +1997,14 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         gcode_size_mb = gcode_size / 1024 / 1024
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
-        # Update database with results
-        filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
+        # Update database with results — extract colors from active positions
+        # After scatter, extruder_colors is positional (e.g. assignments [2,3]
+        # puts colors at indices 2,3). Use assigned positions, not [:len].
+        if request.extruder_assignments:
+            active_colors = [extruder_colors[pos] for pos in request.extruder_assignments if pos < len(extruder_colors)]
+        else:
+            active_colors = extruder_colors[:len(filaments)]
+        filament_colors_json = json.dumps(active_colors)
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             # Only mark completed if the job hasn't been cancelled in the meantime.
@@ -2059,7 +2067,6 @@ async def slice_upload(upload_id: int, request: SliceRequest):
             display_colors = detected_colors
         else:
             display_colors = json.loads(filament_colors_json)
-
         _clear_progress(job_id)
         return {
             "job_id": job_id,
@@ -2360,12 +2367,6 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
             material_types.append(str(f.get("material", "PLA") or "PLA"))
             profile_names.append(str(f.get("name", "Snapmaker PLA") or "Snapmaker PLA"))
         
-        # Override colors if user specified custom colors per extruder
-        if request.filament_colors:
-            for idx, color in enumerate(request.filament_colors):
-                if idx < len(extruder_colors):
-                    extruder_colors[idx] = color
-
         # Place filament settings into correct positional slots.
         # When extruder_assignments maps filaments to non-default positions
         # (e.g. filament_ids=[A,B] + assignments=[2,3]), scatter each
@@ -2412,6 +2413,14 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
                 material_types.append(material_types[-1] if material_types else "PLA")
             while len(profile_names) < 4:
                 profile_names.append(profile_names[-1] if profile_names else "Snapmaker PLA")
+
+        # Override colors if user specified custom colors per extruder.
+        # Applied AFTER scatter so request.filament_colors (a positional 4-slot
+        # array from the UI) patches the full positional extruder_colors array.
+        if request.filament_colors:
+            for idx, color in enumerate(request.filament_colors):
+                if idx < len(extruder_colors):
+                    extruder_colors[idx] = color
 
         remap_slots = max(extruder_remap.values()) if extruder_remap else 0
         extruder_count = max(len(filaments), remap_slots)
@@ -2781,8 +2790,12 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         gcode_size_mb = gcode_size / 1024 / 1024
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
-        # Update database with results
-        filament_colors_json = json.dumps(extruder_colors[:len(filaments)])
+        # Update database with results — extract colors from active positions
+        if request.extruder_assignments:
+            active_colors = [extruder_colors[pos] for pos in request.extruder_assignments if pos < len(extruder_colors)]
+        else:
+            active_colors = extruder_colors[:len(filaments)]
+        filament_colors_json = json.dumps(active_colors)
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             result_tag = await conn.execute(
