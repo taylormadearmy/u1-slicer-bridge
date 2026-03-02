@@ -49,12 +49,22 @@
 
         init() {
             if (!this.canvas || this.renderer) return;
+            // Don't retry after a failed init — avoids a context-creation storm
+            // when setLayout/setPrimeTower both call init() on every update.
+            if (this._initFailed) return;
 
+            try {
             this.renderer = new THREE.WebGLRenderer({
                 canvas: this.canvas,
                 antialias: true,
                 alpha: false,
             });
+            } catch (e) {
+                console.warn('[placement-viewer] WebGL context creation failed:', e.message);
+                this._initFailed = true;
+                this.renderer = null;
+                return;
+            }
             this.renderer.setPixelRatio(window.devicePixelRatio || 1);
             this.renderer.setClearColor(0xf8fafc, 1);
 
@@ -93,6 +103,10 @@
                 this.canvas.removeEventListener('contextmenu', this._onContextMenu);
             }
             if (this.renderer) {
+                // forceContextLoss() is required to actually release the WebGL
+                // context slot in Chrome. dispose() alone doesn't free it, so
+                // repeated file opens exhaust the browser's context limit (~8-16).
+                this.renderer.forceContextLoss();
                 this.renderer.dispose();
             }
             this.objectMeshes.clear();
@@ -101,6 +115,7 @@
             this.renderer = null;
             this.scene = null;
             this.camera = null;
+            this._initFailed = false; // Reset so next init attempt can succeed
         }
 
         setLayout(layout, getPoseFn, geometryData = null) {
