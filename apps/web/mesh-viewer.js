@@ -133,6 +133,8 @@
 
             if (!this.renderer) this.init();
 
+            if (this._initFailed) { this._render2D(); return; }
+
             if (!this.layout) {
                 this._rebuildScene();
                 return;
@@ -148,6 +150,7 @@
         setSelected(buildItemIndex) {
             const idx = Number(buildItemIndex || 0) || null;
             this.selectedBuildItemIndex = idx;
+            if (this._initFailed) { this._render2D(); return; }
             this._refreshObjectStyles();
         }
 
@@ -194,6 +197,7 @@
                 ));
             this.primeTower = next;
             if (!this.renderer) this.init();
+            if (this._initFailed) { this._render2D(); return; }
             if (same) {
                 this._refreshPrimeTowerPose();
                 this._render();
@@ -224,6 +228,7 @@
         }
 
         refreshPoses() {
+            if (this._initFailed) { this._render2D(); return; }
             if (!this.objectsGroup || !this.layout || !this.getPose) return;
             for (const obj of (this.layout.objects || [])) {
                 const idx = Number(obj.build_item_index || 0);
@@ -531,6 +536,7 @@
         }
 
         _resize() {
+            if (this._initFailed) { this._render2D(); return; }
             if (!this.renderer || !this.camera) return;
             const container = this.canvas.parentElement || this.canvas;
             const w = Math.max(100, container.clientWidth || this.canvas.clientWidth || 100);
@@ -538,6 +544,142 @@
             this.camera.aspect = w / h;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(w, h, false);
+        }
+
+        // 2D canvas fallback used when WebGL is unavailable (GPU sandbox disabled,
+        // hardware acceleration off, or context limit exhausted).  Draws a top-down
+        // schematic of the build plate with object footprints and prime tower.
+        _render2D() {
+            if (!this.canvas) return;
+            const container = this.canvas.parentElement || this.canvas;
+            const w = Math.max(100, container.clientWidth || this.canvas.clientWidth || 300);
+            const h = Math.max(80, container.clientHeight || this.canvas.clientHeight || 200);
+            if (this.canvas.width !== w || this.canvas.height !== h) {
+                this.canvas.width = w;
+                this.canvas.height = h;
+            }
+            const ctx = this.canvas.getContext('2d');
+            if (!ctx) return;
+
+            const vol = this.layout?.build_volume || { x: 270, y: 270 };
+            const bedW = Math.max(1, Number(vol.x || 270));
+            const bedD = Math.max(1, Number(vol.y || 270));
+
+            // Banner height at top
+            const bannerH = 22;
+            const pad = 12;
+            const scale = Math.min((w - 2 * pad) / bedW, (h - bannerH - 2 * pad) / bedD);
+            const offX = (w - bedW * scale) / 2;
+            const offY = bannerH + pad + ((h - bannerH - 2 * pad) - bedD * scale) / 2;
+
+            // bed coords (mm) → canvas pixels
+            const toC = (bx, by) => ({
+                x: offX + bx * scale,
+                y: offY + (bedD - by) * scale,
+            });
+
+            // Background
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(0, 0, w, h);
+
+            // Warning banner
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(0, 0, w, bannerH);
+            ctx.fillStyle = '#1c1917';
+            ctx.font = 'bold 11px system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('3D viewer unavailable — restart browser to restore', w / 2, bannerH / 2);
+
+            // Build plate
+            const tl = toC(0, bedD);
+            const br = toC(bedW, 0);
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+
+            // Grid lines every 10 mm
+            ctx.strokeStyle = '#e2e8f0';
+            ctx.lineWidth = 0.5;
+            for (let x = 0; x <= bedW; x += 10) {
+                const p0 = toC(x, 0); const p1 = toC(x, bedD);
+                ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+            }
+            for (let y = 0; y <= bedD; y += 10) {
+                const p0 = toC(0, y); const p1 = toC(bedW, y);
+                ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+            }
+
+            // Plate border
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+
+            // Objects
+            const COLORS = ['#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#a855f7', '#06b6d4'];
+            const objs = this.layout?.objects || [];
+            for (let i = 0; i < objs.length; i++) {
+                const obj = objs[i];
+                const idx = Number(obj.build_item_index || 0);
+                if (!idx) continue;
+
+                const pose = (this.getPose && this.getPose(obj)) || { x: 0, y: 0, rotate_z_deg: 0 };
+                const lb = obj.local_bounds || null;
+                const size = (lb && Array.isArray(lb.size))
+                    ? lb.size.map((v, k) => Math.max(k === 2 ? 1 : 4, Number(v || 0)))
+                    : [20, 20, 10];
+                const bmin = (lb && Array.isArray(lb.min)) ? lb.min : [0, 0, 0];
+                const bmax = (lb && Array.isArray(lb.max)) ? lb.max : size;
+                const cl = [
+                    (Number(bmin[0]) + Number(bmax[0])) / 2,
+                    (Number(bmin[1]) + Number(bmax[1])) / 2,
+                ];
+
+                const cx = toC(Number(pose.x || 0) + cl[0], Number(pose.y || 0) + cl[1]);
+                const rx = size[0] * scale / 2;
+                const ry = size[1] * scale / 2;
+                const angle = -Number(pose.rotate_z_deg || 0) * Math.PI / 180;
+                const isSelected = idx === this.selectedBuildItemIndex;
+                const color = COLORS[i % COLORS.length];
+
+                ctx.save();
+                ctx.translate(cx.x, cx.y);
+                ctx.rotate(angle);
+                ctx.fillStyle = color + (isSelected ? 'cc' : '55');
+                ctx.fillRect(-rx, -ry, rx * 2, ry * 2);
+                ctx.strokeStyle = isSelected ? '#ffffff' : color;
+                ctx.lineWidth = isSelected ? 2 : 1;
+                ctx.strokeRect(-rx, -ry, rx * 2, ry * 2);
+                const labelPx = Math.min(rx, ry, 14);
+                if (labelPx >= 5) {
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = `bold ${Math.max(8, Math.min(13, labelPx))}px system-ui, sans-serif`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(String(idx), 0, 0);
+                }
+                ctx.restore();
+            }
+
+            // Prime tower
+            if (this.primeTower) {
+                const tw = Number(this.primeTower.width || 35);
+                const brim = Number(this.primeTower.brim_width || 0);
+                const tot = tw + 2 * brim;
+                const px = Number(this.primeTower.x || 0);
+                const py = Number(this.primeTower.y || 0);
+                const ptl = toC(px, py + tot);
+                ctx.fillStyle = '#94a3b833';
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 1;
+                const pw = tot * scale;
+                ctx.fillRect(ptl.x, ptl.y, pw, pw);
+                ctx.strokeRect(ptl.x, ptl.y, pw, pw);
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '9px system-ui, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('P', ptl.x + pw / 2, ptl.y + pw / 2);
+            }
         }
 
         _clearGroup(group) {
