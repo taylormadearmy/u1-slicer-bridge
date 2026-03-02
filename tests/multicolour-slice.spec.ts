@@ -183,6 +183,42 @@ test.describe('Multicolour Slicing End-to-End (M11)', () => {
     expect(execGcode).not.toMatch(/SM_PRINT_AUTO_FEED\s+EXTRUDER=1/);
   });
 
+  test('assignments [2,3] stores full positional filament_colors in job (viewer regression)', async ({ request }) => {
+    // Regression: filament_colors stored only active-position colors (2 entries)
+    // losing positional info. Viewer got ['red','blue'] and labelled E1/E2 instead
+    // of E3/E4. Fix: store full 4-slot positional array with #FFFFFF for unused.
+    const upload = await apiUpload(request, 'calib-cube-10-dual-colour-merged.3mf');
+    const fil = await getDefaultFilament(request);
+
+    const res = await request.post(`${API}/uploads/${upload.upload_id}/slice`, {
+      data: {
+        filament_ids: [fil.id, fil.id, fil.id, fil.id],
+        extruder_assignments: [2, 3],
+        filament_colors: ['#FFFFFF', '#FFFFFF', '#FF0000', '#0000FF'],
+        layer_height: 0.2,
+        infill_density: 15,
+        supports: false,
+      },
+      timeout: 120_000,
+    });
+    expect(res.ok()).toBe(true);
+    const job = await waitForJobComplete(request, await res.json());
+    expect(job.status).toBe('completed');
+
+    // Fetch job and verify filament_colors is a full positional array
+    const jobRes = await request.get(`${API}/jobs/${job.job_id}`, { timeout: 30_000 });
+    const jobData = await jobRes.json();
+    expect(jobData.filament_colors).toBeDefined();
+    // Must have at least 4 entries (full positional array, not just 2)
+    expect(jobData.filament_colors.length).toBeGreaterThanOrEqual(4);
+    // E3 (index 2) and E4 (index 3) must have the assigned colors
+    expect(jobData.filament_colors[2]).toBe('#FF0000');
+    expect(jobData.filament_colors[3]).toBe('#0000FF');
+    // E1/E2 (indices 0,1) should be #FFFFFF (unused placeholder)
+    expect(jobData.filament_colors[0]).toBe('#FFFFFF');
+    expect(jobData.filament_colors[1]).toBe('#FFFFFF');
+  });
+
   test('sparse filament_ids [A,B] + assignments [2,3] heats E3+E4, not all-zero (API regression)', async ({ request }) => {
     // Regression: when API consumer sends only 2 filament_ids (not 4 gap-fillers)
     // with extruder_assignments [2,3], the sequential temp array [T_A, T_B, "0", "0"]

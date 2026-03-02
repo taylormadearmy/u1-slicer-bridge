@@ -1997,14 +1997,12 @@ async def slice_upload(upload_id: int, request: SliceRequest):
         gcode_size_mb = gcode_size / 1024 / 1024
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
-        # Update database with results — extract colors from active positions
-        # After scatter, extruder_colors is positional (e.g. assignments [2,3]
-        # puts colors at indices 2,3). Use assigned positions, not [:len].
-        if request.extruder_assignments:
-            active_colors = [extruder_colors[pos] for pos in request.extruder_assignments if pos < len(extruder_colors)]
-        else:
-            active_colors = extruder_colors[:len(filaments)]
-        filament_colors_json = json.dumps(active_colors)
+        # Store full positional color array so viewer maps T0→color[0], etc.
+        # After scatter, extruder_colors is already a 4-slot positional array
+        # (e.g. assignments [2,3] → colors at indices 2,3, #FFFFFF elsewhere).
+        # Previously we extracted only active positions, but that lost positional
+        # info — viewer got 2 colors and labelled them E1/E2 instead of E3/E4.
+        filament_colors_json = json.dumps(extruder_colors)
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             # Only mark completed if the job hasn't been cancelled in the meantime.
@@ -2790,12 +2788,8 @@ async def slice_plate(upload_id: int, request: SlicePlateRequest):
         gcode_size_mb = gcode_size / 1024 / 1024
         job_logger.info(f"G-code saved: {final_gcode_path} ({gcode_size_mb:.2f} MB)")
 
-        # Update database with results — extract colors from active positions
-        if request.extruder_assignments:
-            active_colors = [extruder_colors[pos] for pos in request.extruder_assignments if pos < len(extruder_colors)]
-        else:
-            active_colors = extruder_colors[:len(filaments)]
-        filament_colors_json = json.dumps(active_colors)
+        # Store full positional color array (see full-file slice comment above)
+        filament_colors_json = json.dumps(extruder_colors)
         filament_used_g_json = json.dumps(metadata.get('filament_used_g', []))
         async with pool.acquire() as conn:
             result_tag = await conn.execute(
