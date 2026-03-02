@@ -215,7 +215,7 @@ When adding vendored libraries, CDN dependencies, or new pip/npm packages:
 - For broad changes (multiple files, API + frontend, refactors), recommend `test:fast` or full suite.
 
 ```bash
-# Fast regression (~103 tests, ~2 min; excludes heavy @extended multiplate/transform cases)
+# Fast regression (~124 tests, ~5 min; excludes heavy @extended multiplate/transform cases)
 npm run test:fast
 
 # Extended regression (~7 tests, ~5 min; heavy multi-plate / slice-plate transform cases)
@@ -764,6 +764,19 @@ Added ability to set build plate type per filament and override temperatures at 
 - **Fix**: Added `bed_temperature_initial_layer_single` to filament_settings in routes_slice.py
 - **Result**: Bed temp correctly set to requested value (e.g., M140 S70)
 
+**Fixed: Misleading Color Name Labels in Extruder Dropdown**
+- **Problem**: `colorName()` function mapped NFC manufacturer colors to wrong text labels — e.g., sage green `#519F61` → "Gray", dark navy `#003776` → "Black"
+- **Root Cause**: Simple Euclidean RGB distance against 11 named colors can't distinguish muted/dark manufacturer colours
+- **Fix**: Replaced native `<select>` with custom Alpine.js dropdown showing actual color swatches per extruder slot (E1–E4)
+- **Result**: Users see real colours instead of misleading text labels
+
+**Fixed: Positional filament_colors Storage for Non-Default Extruder Assignments**
+- **Problem**: When extruder_assignments = [2,3] (E3/E4), G-code viewer showed E1/E2 with wrong colours and pink fallback
+- **Root Cause**: `routes_slice.py` extracted only active-position colors from the 4-slot positional array — storing `["#E72F1D", "#003776"]` (2 entries) instead of `["#FFFFFF", "#FFFFFF", "#E72F1D", "#003776"]` (4 entries). Viewer got 2 colors, labelled them T0/T1 (E1/E2); actual G-code T2/T3 had no color → pink fallback
+- **Fix**: Store full positional `extruder_colors` array in DB (both full-file and per-plate slice paths). Hide unused `#FFFFFF` entries in viewer color legend via `x-show`
+- **Result**: Viewer correctly maps T2→color[2], T3→color[3]; legend shows only active extruders
+- **Regression test**: `multicolour-slice.spec.ts` — "assignments [2,3] stores full positional filament_colors in job"
+
 ---
 
 ## Custom Filament Profiles (M13)
@@ -830,9 +843,9 @@ All tests use Playwright and live in `tests/`. Config is in `playwright.config.t
 **Prerequisites:** Docker services running, `npm install`, `npx playwright install chromium`.
 
 ```bash
-npm run test:fast              # Fast regression (~103 tests, ~2 min)
+npm run test:fast              # Fast regression (~124 tests, ~5 min)
 npm run test:extended          # Extended regression (~7 heavy tests, ~5 min)
-npm test                       # Run ALL tests (148 tests, ~60 min)
+npm test                       # Run ALL tests (183 tests, ~35 min)
 npm run test:smoke             # Quick smoke tests (~15s, no slicer needed)
 npm run test:upload            # Upload workflow
 npm run test:slice             # Slicing end-to-end (slow, needs slicer)

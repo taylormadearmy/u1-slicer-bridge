@@ -32,7 +32,7 @@ No Redis, no worker service — slicing runs in-process via `asyncio.to_thread()
   - `viewer.js` — 3D G-code viewer (gcode-preview + Three.js)
   - `lib/` — Vendored libraries (Three.js r159, gcode-preview v2.18.0)
 - `test-data/` — 3MF test fixtures with attribution
-- `tests/` — Playwright test specs (148 tests across 19 spec files)
+- `tests/` — Playwright test specs (183 tests across 20 spec files)
 
 ## Workflow
 
@@ -95,9 +95,9 @@ Optional/future milestones with detailed plans in `memory/`:
 ### Testing
 - **IMPORTANT**: Always redirect test output to a project-local file: `npm test 2>&1 | tee tmp_test_output.txt` (with 600s timeout, NOT in background)
 - Background task temp files get cleaned up and become unreadable. `tmp_*` files are already gitignored
-- Fast tests: `npm run test:fast` (~103 tests, ~2 min) � use for everyday development
-- Extended tests: `npm run test:extended` (~7 heavy tests, ~5 min) � use for multi-plate / transform regressions
-- Full tests: `npm test` (~150+ tests, ~60 min) � use before releases
+- Fast tests: `npm run test:fast` (~124 tests, ~5 min) — use for everyday development
+- Extended tests: `npm run test:extended` (~7 heavy tests, ~5 min) — use for multi-plate / transform regressions
+- Full tests: `npm test` (~183 tests, ~35 min) — use before releases
 - Tests run sequentially (`workers: 1`) sharing Docker services and DB state
 - When adding third-party libraries, update [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) with name, version, license, copyright, and source URL
 
