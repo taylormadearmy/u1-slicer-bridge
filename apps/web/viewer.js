@@ -148,7 +148,7 @@ function gcodeViewer(initialJobId, initialFilamentColors = null) {
             const testCanvas = document.createElement('canvas');
             const gl = testCanvas.getContext('webgl') || testCanvas.getContext('experimental-webgl');
             if (!gl) {
-                this.error = 'WebGL is not supported in this browser. Please use a modern browser with hardware acceleration enabled.';
+                this.error = 'G-code preview requires hardware acceleration (WebGL). To fix in Chrome: Settings → System → enable "Use graphics acceleration when available" → Relaunch.';
                 return;
             }
 
