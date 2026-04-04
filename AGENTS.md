@@ -950,6 +950,22 @@ When implementing a new feature or fixing a bug:
 4. After changes, deploy to Docker and run at least the targeted test suite.
 5. Offer the user a choice: `test:fast` (~2 min), `test:extended` (~5 min), targeted tests, or full suite (~60 min).
 
+### Bug Bank (Open — Not Yet Fixed)
+
+**B1: G-code Layer Shapes Look Like Rectangles Instead of Tubes**
+- **Problem**: G-code layer visualization renders layers as flat rectangles rather than rounded tubes/cylinders. The extrusion paths should appear as rounded filament deposits but instead display as rectangular cross-sections.
+- **Area**: `apps/web/viewer.js` (gcode-preview rendering)
+- **Status**: Open
+- **GitHub Issue**: TBD
+
+**B2: G-code Shadows Too Dark (Appear as Black Filament)**
+- **Problem**: Shadows in the G-code 3D viewer are excessively dark, making shaded areas look like they are printed with black filament rather than being naturally shadowed regions of the actual filament color.
+- **Area**: `apps/web/viewer.js` (Three.js lighting/materials)
+- **Status**: Open
+- **GitHub Issue**: TBD
+
+---
+
 ### Scale and Layout Notes (2026-02-21)
 
 - For Bambu-style multi-component assemblies (for example `calib-cube-10-dual-colour-merged.3mf`), internal spacing is defined in both:
