@@ -53,8 +53,9 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
-# Claude Code
-.claude/
+# Claude Code (ignore local settings and session artifacts, but track committed skills)
+.claude/*
+!.claude/skills/
 
 # OpenCode editor config
 .opencode/
